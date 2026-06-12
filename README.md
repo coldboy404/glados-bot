@@ -67,7 +67,7 @@ GLaDOS 自动签到 + NodeLoc 自动阅读 合体 Telegram Bot，运行在 Cloud
 
 **iPhone（Surge 模块）：**
 1. 安装 [Surge 模块](https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml)
-2. Safari 打开 `https://www.nodeloc.com/my/preferences` 并登录
+2. Safari 打开 `https://www.nodeloc.com/u/linsar/preferences/account` 并登录
 3. 模块自动抓取 Cookie，弹出通知
 4. 复制整段 Cookie 发送给 Bot
 
