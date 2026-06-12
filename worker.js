@@ -50,7 +50,7 @@ async function nlRefreshQueue(cookie) {
 
 // 模拟阅读一帖（静默，不抛消息）
 async function nlReadTopic(cookie, topic) {
-    await nlSleep(nlRand(3000, 8000));
+    await nlSleep(nlRand(5000, 15000));
     const ua = NL_UAS[nlRand(0, NL_UAS.length-1)];
     const hdrs = {
         'User-Agent': ua,
@@ -71,7 +71,7 @@ async function nlReadTopic(cookie, topic) {
 
     const html = await resp.text();
     const csrf = (html.match(/csrf-token" content="([^"]+)"/) || [])[1];
-    const readTime = nlRand(30000, 50000);
+    const readTime = nlRand(60000, 120000);
     await nlSleep(readTime);
 
     if (csrf) {
