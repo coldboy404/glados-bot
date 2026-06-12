@@ -36,6 +36,15 @@ GLaDOS 自动签到 + NodeLoc 自动阅读 合体 Telegram Bot，运行在 Cloud
 5. **部署并激活**
    - Cron 触发器已默认配置 `0 * * * *`，无需手动设置
    - 部署完成后**访问 Worker 域名**，自动激活 Webhook + 注册命令
+   - 浏览器显示以下内容表示激活成功：
+     ```json
+     {
+       "status": "running",
+       "webhook": "✅ 已激活",
+       "commands": "✅ 已注册",
+       "note": "发送 /start 开始使用"
+     }
+     ```
    - 然后给你的 Bot 发 `/start` 即开始使用
    - ⚠️ `wrangler.toml` 中 `kv_namespaces` 不要写 `id` 字段，否则部署会失败
 

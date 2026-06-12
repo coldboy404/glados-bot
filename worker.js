@@ -238,6 +238,7 @@ export default {
         }
         return new Response(JSON.stringify({
             status: 'running',
+            message: 'GLaDOS Bot 链式驱动引擎正常运行中。',
             webhook: setupResult.webhook ? '✅ 已激活' : '❌ 未激活（请配置 BOT_TOKEN）',
             commands: setupResult.commands ? '✅ 已注册' : '⚠️ 未注册',
             note: '发送 /start 开始使用'
