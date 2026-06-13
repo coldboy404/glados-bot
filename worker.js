@@ -709,17 +709,17 @@ async function handleCallback(callbackQuery, env, origin) {
     else if (data === 'add_nodeloc') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODELOC_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeloc.com', { expirationTtl: 300 });
-        await tgSend(chatId, "🌐 <b>绑定 NodeLoc 账号</b>\n\n发送格式：<code>名称:cookie</code>\n\n示例：<code>主号:_forum_session=xxx; _t=yyy</code>\n\n📌 名称 可以是任意标识（用户名/备注），用于区分多账号。", env);
+        await tgSend(chatId, "🌐 <b>绑定 NodeLoc 账号</b>\n\n直接发送 Cookie，Bot 自动解析用户名。\n\n格式：<code>_forum_session=xxx; _t=yyy</code>\n\n💡 先登录 NodeLoc，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
     }
     else if (data === 'add_nodeseek') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODESEEK_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeseek.cc', { expirationTtl: 300 });
-        await tgSend(chatId, "🔹 <b>绑定 NodeSeek 账号</b>\n\n发送格式：<code>名称:_forum_session=xxx; _t=yyy</code>\n\n📌 名称 可以是任意标识（用户名/备注），用于区分多账号。\n\n💡 先登录 NodeSeek，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
+        await tgSend(chatId, "🔹 <b>绑定 NodeSeek 账号</b>\n\n直接发送 Cookie，Bot 自动解析用户名。\n\n格式：<code>_forum_session=xxx; _t=yyy</code>\n\n💡 先登录 NodeSeek，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
     }
     else if (data === 'add_linuxdo') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_LINUXDO_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'linux.do', { expirationTtl: 300 });
-        await tgSend(chatId, "🐧 <b>绑定 Linux DO 账号</b>\n\n发送格式：<code>名称:_forum_session=xxx; _t=yyy</code>\n\n📌 名称 可以是任意标识（用户名/备注），用于区分多账号。\n\n💡 先登录 linux.do，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
+        await tgSend(chatId, "🐧 <b>绑定 Linux DO 账号</b>\n\n直接发送 Cookie，Bot 自动解析用户名。\n\n格式：<code>_forum_session=xxx; _t=yyy</code>\n\n💡 先登录 linux.do，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
     }
     else if (data.startsWith('doexch_')) {
         const parts = data.split('_');
@@ -742,6 +742,22 @@ async function handleCallback(callbackQuery, env, origin) {
     }
 }
 
+// 通过 Discourse API 获取当前登录用户的用户名和邮箱
+async function fetchDiscourseUser(cookie, baseUrl) {
+    try {
+        const res = await fetch(baseUrl + '/session/current.json', {
+            headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cookie }
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const user = data && data.current_user;
+        if (user && user.username) return { username: user.username, email: user.email || '' };
+        return null;
+    } catch(e) {
+        return null;
+    }
+}
+
 // ================= 输入消息逻辑处理 =================
 async function processAddAccountInfo(chatId, userId, text, env) {
     const state = await env.GLADOS_DB.get(`STATE_${userId}`);
@@ -750,81 +766,57 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     await env.GLADOS_DB.delete(`TEMP_${userId}`);
     if (!domain) return tgSend(chatId, "❌ 会话过期，请重新选择站点。", env);
 
-    // NodeLoc: 格式是 名称:cookie
+    // NodeLoc: 直接发 cookie，bot 自动提取用户名
     if (state === 'AWAITING_NODELOC_COOKIE') {
         let cookie = text.trim();
-        let name = cookie;
-        const colonIdx = cookie.indexOf(':');
-        if (colonIdx > 0 && cookie.indexOf('=') > colonIdx) {
-            name = cookie.substring(0, colonIdx);
-            cookie = cookie.substring(colonIdx + 1);
-        } else {
-            // 自动编号：nodeloc-1, nodeloc-2...
-            const accounts = await getAccounts(userId, env);
-            const existing = accounts.filter(a => a.domain === 'nodeloc.com').length;
-            name = 'nodeloc' + (existing > 0 ? '-' + (existing + 1) : '');
+        if (!/_forum_session=/.test(cookie)) {
+            return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
         }
+        const userInfo = await fetchDiscourseUser(cookie, NL_BASE);
+        if (!userInfo) return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录 NodeLoc 后重新抓取。", env);
         let accounts = await getAccounts(userId, env);
-        accounts.push({ email: name, domain: 'nodeloc.com', cookie: cookie });
+        accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeloc.com', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nlTotal = accounts.filter(a => a.domain === 'nodeloc.com').length;
-        await tgSend(chatId, `✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个\n\n💡 如需给账号取名，重新绑定用 <code>名称:cookie</code> 格式即可。`, env);
+        await tgSend(chatId, `✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个`, env);
         return;
     }
 
-    // NodeSeek: 格式是 名称:cookie（cookie 格式：_forum_session=xxx; _t=yyy）
+    // NodeSeek: 直接发 cookie，bot 自动提取用户名
     if (state === 'AWAITING_NODESEEK_COOKIE') {
         let cookie = text.trim();
-        let name = cookie;
-        const colonIdx = cookie.indexOf(':');
-        if (colonIdx > 0 && cookie.indexOf('=') > colonIdx) {
-            name = cookie.substring(0, colonIdx);
-            cookie = cookie.substring(colonIdx + 1);
-        } else {
-            const accounts = await getAccounts(userId, env);
-            const existing = accounts.filter(a => a.domain === 'nodeseek.cc').length;
-            name = 'nodeseek' + (existing > 0 ? '-' + (existing + 1) : '');
-        }
         if (!/_forum_session=/.test(cookie)) {
-            await tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。\n\n完整格式：<code>名称:_forum_session=xxx; _t=yyy</code>", env);
-            return;
+            return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
         }
+        const userInfo = await fetchDiscourseUser(cookie, NS_BASE);
+        if (!userInfo) return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录 NodeSeek 后重新抓取。", env);
         let accounts = await getAccounts(userId, env);
-        accounts.push({ username: name, domain: 'nodeseek.cc', cookie: cookie });
+        accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeseek.cc', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nsTotal = accounts.filter(a => a.domain === 'nodeseek.cc').length;
-        await tgSend(chatId, `✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。\n💡 提示：如需命名请用 <code>名称:cookie</code> 格式。`, env);
+        await tgSend(chatId, `✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
         return;
     }
 
-    // LinuxDO: 同 nodeseek 格式
+    // LinuxDO: 直接发 cookie，bot 自动提取用户名
     if (state === 'AWAITING_LINUXDO_COOKIE') {
         let cookie = text.trim();
-        let name = cookie;
-        const colonIdx = cookie.indexOf(':');
-        if (colonIdx > 0 && cookie.indexOf('=') > colonIdx) {
-            name = cookie.substring(0, colonIdx);
-            cookie = cookie.substring(colonIdx + 1);
-        } else {
-            const accounts = await getAccounts(userId, env);
-            const existing = accounts.filter(a => a.domain === 'linux.do').length;
-            name = 'linuxdo' + (existing > 0 ? '-' + (existing + 1) : '');
-        }
         if (!/_forum_session=/.test(cookie)) {
-            await tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。\n\n完整格式：<code>名称:_forum_session=xxx; _t=yyy</code>", env);
-            return;
+            return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
         }
+        const userInfo = await fetchDiscourseUser(cookie, LD_BASE);
+        if (!userInfo) return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录 LinuxDO 后重新抓取。", env);
         let accounts = await getAccounts(userId, env);
-        accounts.push({ username: name, domain: 'linux.do', cookie: cookie });
+        accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'linux.do', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const ldTotal = accounts.filter(a => a.domain === 'linux.do').length;
-        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n🐧 账号: <code>${name}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。\n💡 提示：如需命名请用 <code>名称:cookie</code> 格式。`, env);
+        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
         return;
     }
 
