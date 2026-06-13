@@ -499,7 +499,7 @@ async function handleCallback(callbackQuery, env, origin) {
 
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_ACCOUNT_INFO', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, selectedSite, { expirationTtl: 300 });
-        const msg = `📝 您选择了站点: <b>${selectedSite}</b>\n\n<b>请发送账号信息</b>\n(支持多行，全局根据邮箱强制覆盖去重)，格式：\n<code>邮箱:cookie</code>`;
+        const msg = `📝 您选择了站点: <b>${selectedSite}</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱:cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
         await tgSend(chatId, msg, env);
     }
     else if (data === 'clear_all_confirm') {
@@ -818,6 +818,33 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         const ldTotal = accounts.filter(a => a.domain === 'linux.do').length;
         await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
         return;
+    }
+
+    // GLaDOS 裸 cookie：自动提取邮箱
+    if (text.indexOf(':') === -1 && text.indexOf('=') > -1 && /expires=|connect.sid|_forum_session/.test(text) === false) {
+        const gladosDomains = ['glados.network', 'railgun.info', 'glados.vip', 'glados.one', 'glados.space'];
+        let found = null;
+        for (const d of gladosDomains) {
+            try {
+                const res = await fetch(`https://${d}/api/user/info`, {
+                    headers: { ...HEADERS, 'Cookie': text.trim() }
+                });
+                const data = await res.json();
+                if (data && data.code === 0 && data.data && data.data.userInfo && data.data.userInfo.email) {
+                    found = { email: data.data.userInfo.email, domain: d };
+                    break;
+                }
+            } catch(e) {}
+        }
+        if (found) {
+            let accounts = await getAccounts(userId, env);
+            accounts.push({ domain: found.domain, email: found.email, cookie: text.trim() });
+            await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
+            await saveUserIdForCron(userId, env);
+            const total = accounts.filter(a => a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc' && a.domain !== 'linux.do').length;
+            return tgSend(chatId, `✅ <b>GLaDOS 绑定成功！</b>\n\n👤 账号: <code>${found.email}</code>\n🔗 域名: <code>${found.domain}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n💡 如需手动绑定，使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式。`, env);
+        }
+        return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式手动绑定。", env);
     }
 
     const lines = text.split('\n');
