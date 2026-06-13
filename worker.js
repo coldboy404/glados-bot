@@ -189,7 +189,10 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE) {
             // 确保队列有话题
             if (state.queue.length === 0) {
                 const topics = await nlRefreshQueue(baseUrl, cookie);
-                if (topics.length === 0) break;
+                if (topics.length === 0) {
+                    state._lastError = '刷新队列返回空';
+                    break;
+                }
                 // shuffle
                 for (let i = topics.length - 1; i > 0; i--) {
                     const j = Math.floor(Math.random() * (i + 1));
@@ -202,6 +205,7 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE) {
             const result = await nlReadTopic(baseUrl, cookie, topic);
             if (!result.ok) {
                 if (result.cookieError) state.cookieError = result.cookieError;
+                state._lastError = result.cookieError ? 'Cookie 过期' : ('话题 #' + topic.id + ' 阅读失败');
                 break;
             }
             state.readsToday++;
@@ -654,16 +658,24 @@ async function handleCallback(callbackQuery, env, origin) {
             return;
         }
         if (acc.domain === 'nodeseek.cc') {
-            await tgSend(chatId, "📖 正在执行 NodeSeek 立即阅读...", env);
+            const resp = await tgSend(chatId, "📖 正在执行 NodeSeek 立即阅读...", env);
+            const msgId = resp?.result?.message_id;
             try {
                 const state = JSON.parse(await env.GLADOS_DB.get('NS_STATE_' + userId) || '{}');
                 delete state.restUntil;
                 await env.GLADOS_DB.put('NS_STATE_' + userId, JSON.stringify(state));
                 await runNodelocBatch(userId, acc.cookie, env, 'https://nodeseek.cc');
                 const st = JSON.parse(await env.GLADOS_DB.get('NS_STATE_' + userId) || '{}');
-                await tgSend(chatId, `✅ NodeSeek 阅读完成！\n📖 累计已读 ${st.readTotal || 0} 帖（今日 ${st.readsToday || 0} 帖）`, env);
+                const info = [];
+                info.push(`✅ 阅读完成！`);
+                info.push(`📖 本次累计 ${st.readTotal || 0} 帖（今日 ${st.readsToday || 0} 帖）`);
+                if (st.cookieError) info.push(`⚠️ ${st.cookieError}`);
+                if (st.queue && Array.isArray(st.queue)) info.push(`📋 队列剩余 ${st.queue.length} 帖`);
+                const lastResult = st._lastError;
+                if (lastResult) info.push(`🔍 上次错误: ${lastResult}`);
+                await tgEdit(chatId, msgId, info.join('\n'), null, env);
             } catch(e) {
-                await tgSend(chatId, `❌ 阅读失败: ${e.message || '未知错误'}`, env);
+                await tgEdit(chatId, msgId, `❌ 阅读失败: ${e.message || e.stack || '未知错误'}`, null, env);
             }
             return;
         }
