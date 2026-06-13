@@ -759,16 +759,18 @@ async function processAddAccountInfo(chatId, userId, text, env) {
             name = cookie.substring(0, colonIdx);
             cookie = cookie.substring(colonIdx + 1);
         } else {
-            name = 'nodeloc';
+            // 自动编号：nodeloc-1, nodeloc-2...
+            const accounts = await getAccounts(userId, env);
+            const existing = accounts.filter(a => a.domain === 'nodeloc.com').length;
+            name = 'nodeloc' + (existing > 0 ? '-' + (existing + 1) : '');
         }
         let accounts = await getAccounts(userId, env);
-        accounts = accounts.filter(a => a.domain !== 'nodeloc.com');
         accounts.push({ email: name, domain: 'nodeloc.com', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nlTotal = accounts.filter(a => a.domain === 'nodeloc.com').length;
-        await tgSend(chatId, `✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个`, env);
+        await tgSend(chatId, `✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个\n\n💡 提示：如需为账号命名，请使用 <code>名称:cookie</code> 格式重新绑定。`, env);
         return;
     }
 
@@ -781,21 +783,21 @@ async function processAddAccountInfo(chatId, userId, text, env) {
             name = cookie.substring(0, colonIdx);
             cookie = cookie.substring(colonIdx + 1);
         } else {
-            name = 'nodeseek';
+            const accounts = await getAccounts(userId, env);
+            const existing = accounts.filter(a => a.domain === 'nodeseek.cc').length;
+            name = 'nodeseek' + (existing > 0 ? '-' + (existing + 1) : '');
         }
-        // 验证 cookie 是否包含必要字段
         if (!/_forum_session=/.test(cookie)) {
             await tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。\n\n完整格式：<code>名称:_forum_session=xxx; _t=yyy</code>", env);
             return;
         }
         let accounts = await getAccounts(userId, env);
-        accounts = accounts.filter(a => a.domain !== 'nodeseek.cc');
         accounts.push({ username: name, domain: 'nodeseek.cc', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nsTotal = accounts.filter(a => a.domain === 'nodeseek.cc').length;
-        await tgSend(chatId, `✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
+        await tgSend(chatId, `✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${name}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。\n💡 提示：如需命名请用 <code>名称:cookie</code> 格式。`, env);
         return;
     }
 
@@ -808,20 +810,21 @@ async function processAddAccountInfo(chatId, userId, text, env) {
             name = cookie.substring(0, colonIdx);
             cookie = cookie.substring(colonIdx + 1);
         } else {
-            name = 'linuxdo';
+            const accounts = await getAccounts(userId, env);
+            const existing = accounts.filter(a => a.domain === 'linux.do').length;
+            name = 'linuxdo' + (existing > 0 ? '-' + (existing + 1) : '');
         }
         if (!/_forum_session=/.test(cookie)) {
             await tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。\n\n完整格式：<code>名称:_forum_session=xxx; _t=yyy</code>", env);
             return;
         }
         let accounts = await getAccounts(userId, env);
-        accounts = accounts.filter(a => a.domain !== 'linux.do');
         accounts.push({ username: name, domain: 'linux.do', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const ldTotal = accounts.filter(a => a.domain === 'linux.do').length;
-        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n🐧 账号: <code>${name}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
+        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n🐧 账号: <code>${name}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。\n💡 提示：如需命名请用 <code>名称:cookie</code> 格式。`, env);
         return;
     }
 
