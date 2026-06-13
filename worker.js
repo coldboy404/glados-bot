@@ -719,7 +719,7 @@ async function handleCallback(callbackQuery, env, origin) {
     else if (data === 'add_linuxdo') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_LINUXDO_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'linux.do', { expirationTtl: 300 });
-        await tgSend(chatId, "🐧 <b>绑定 Linux DO 账号</b>\n\n直接发送 Cookie，Bot 自动解析用户名。\n\n格式：<code>_forum_session=xxx; _t=yyy</code>\n\n💡 先登录 linux.do，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
+        await tgSend(chatId, "🐧 <b>绑定 Linux DO 账号</b>\n\n直接发送 Cookie 即可（如有 CF 防护，自动提示改用邮箱格式）。\n\n格式：<code>_forum_session=xxx; _t=yyy</code>\n\n💡 先登录 linux.do，浏览器 F12 → Application → Cookies → 复制 <code>_forum_session</code> 和 <code>_t</code> 的值。", env);
     }
     else if (data.startsWith('doexch_')) {
         const parts = data.split('_');
@@ -828,37 +828,53 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         return;
     }
 
-    // LinuxDO: 直接发 cookie，bot 自动提取用户名（提取失败也继续绑定）
+    // LinuxDO: 支持 邮箱:cookie 和裸 cookie
     if (state === 'AWAITING_LINUXDO_COOKIE') {
         let cookie = text.trim();
+        // 检查是否是 邮箱:cookie 格式（冒号在 _forum_session 之前）
+        let forcedName = null;
+        const colonIdx = cookie.indexOf(':');
+        const forumIdx = cookie.indexOf('_forum_session=');
+        if (colonIdx > 0 && forumIdx > colonIdx) {
+            forcedName = cookie.substring(0, colonIdx).trim();
+            cookie = cookie.substring(colonIdx + 1).trim();
+        }
         if (!/_forum_session=/.test(cookie)) {
             return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
         }
+        if (forcedName) {
+            // 用户手动提供了邮箱，直接绑定
+            let accounts = await getAccounts(userId, env);
+            const sessionMatch = cookie.match(/_forum_session=([^;]+)/);
+            const sessionVal = sessionMatch ? sessionMatch[1] : null;
+            const exists = accounts.some(a => a.domain === 'linux.do' && a.cookie && sessionVal && a.cookie.includes(sessionVal));
+            if (exists) return tgSend(chatId, `ℹ️ 该账号已绑定（<code>${forcedName}</code>），无需重复操作。`, env);
+            accounts.push({ email: forcedName, username: forcedName, domain: 'linux.do', cookie });
+            await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
+            await saveUserIdForCron(userId, env);
+            const total = accounts.length;
+            const ldTotal = accounts.filter(a => a.domain === 'linux.do').length;
+            return tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n👤 账号: <code>${forcedName}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
+        }
         const userInfo = await fetchDiscourseUser(cookie, LD_BASE);
-        let displayName, email, username;
-        if (userInfo) {
-            email = userInfo.email;
-            username = userInfo.username;
-            displayName = email || username;
-        } else {
-            // CF 防护下无法验证，用 cookie 哈希当标识
-            const m = cookie.match(/_forum_session=([^;]+)/);
-            displayName = 'linuxdo' + (m ? '-' + m[1].substring(0, 6) : '');
-            email = displayName + '@linux.do';
-            username = displayName;
+        if (!userInfo) {
+            // CF 防护下无法验证，提示用邮箱:cookie 格式重新发送
+            await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_LINUXDO_COOKIE', { expirationTtl: 300 });
+            return tgSend(chatId, "⚠️ linux.do 的 Cloudflare 防护阻止了自动验证。\n\n请用 <code>邮箱:cookie</code> 格式重新发送：\n\n<code>your@email.com:_forum_session=xxx; _t=yyy</code>\n\n💡 邮箱仅用于标识账号，不会用于登录。", env);
         }
         let accounts = await getAccounts(userId, env);
         // 去重：同一 _forum_session 不重复绑定
         const sessionMatch = cookie.match(/_forum_session=([^;]+)/);
         const sessionVal = sessionMatch ? sessionMatch[1] : null;
+        const displayName = userInfo.email || userInfo.username;
         const exists = accounts.some(a => a.domain === 'linux.do' && a.cookie && sessionVal && a.cookie.includes(sessionVal));
-        if (exists) return tgSend(chatId, `ℹ️ 该账号已绑定${userInfo ? '（' + displayName + '）' : ''}，无需重复操作。`, env);
-        accounts.push({ email, username, domain: 'linux.do', cookie });
+        if (exists) return tgSend(chatId, `ℹ️ 该账号已绑定（<code>${displayName}</code>），无需重复操作。`, env);
+        accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'linux.do', cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const ldTotal = accounts.filter(a => a.domain === 'linux.do').length;
-        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n👤 账号: <code>${displayName}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个${userInfo ? '' : '\n\n⚠️ 因 CF 防护未能验证 Cookie，已直接绑定。若阅读报错请重新抓取最新 Cookie。'}\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
+        await tgSend(chatId, `✅ <b>LinuxDO 绑定成功！</b>\n\n👤 账号: <code>${displayName}</code>\n🐧 LinuxDO 账号: ${ldTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
         return;
     }
 
