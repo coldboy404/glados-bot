@@ -91,7 +91,7 @@ async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
         return { ok: false, cookieError: 'Cookie 已失效，请重新添加', readTime: 0 };
     }
 
-    const html = await resp.text();
+    const html = await Promise.race([resp.text(), new Promise(function(r){setTimeout(function(){r('')},20000)})]);
     // 优先从 HTML meta 提取 CSRF，部分 Discourse 没有则从 /session/csrf API 获取
     let csrf = (html.match(/csrf-token" content="([^"]+)"/) || [])[1];
     if (!csrf) {
@@ -1367,27 +1367,15 @@ async function handleScheduled(env) {
             }
             await tgSend(userId, `⏰ <b>定时签到自动完成</b>\n已在后台成功向 ${gladosCount} 个账号发送了签到指令。${extraLine}`, env);
         }
-        // NodeLoc 静默阅读（每次 cron 触发都跑，独立于签到）
+        // 三个论坛并行阅读，共享 15 分钟时间窗口
+        const readPromises = [];
         const nlAcc = accounts.find(a => a.domain === 'nodeloc.com' && a.cookie);
-        if (nlAcc) {
-            try {
-                await runNodelocBatch(userId, nlAcc.cookie, env);
-            } catch(e) {}
-        }
-        // NodeSeek 静默阅读（每次 cron 触发都跑，独立于签到）
+        if (nlAcc) readPromises.push(runNodelocBatch(userId, nlAcc.cookie, env).catch(e => {}));
         const nsAcc = accounts.find(a => a.domain === 'nodeseek.cc' && a.cookie);
-        if (nsAcc) {
-            try {
-                await runNodelocBatch(userId, nsAcc.cookie, env, NS_BASE, false, 'NS');
-            } catch(e) {}
-        }
-        // LinuxDO 静默阅读（每次 cron 触发都跑，独立于签到）
+        if (nsAcc) readPromises.push(runNodelocBatch(userId, nsAcc.cookie, env, NS_BASE, false, 'NS').catch(e => {}));
         const ldAcc = accounts.find(a => a.domain === 'linux.do' && a.cookie);
-        if (ldAcc) {
-            try {
-                await runNodelocBatch(userId, ldAcc.cookie, env, LD_BASE, false, 'LD');
-            } catch(e) {}
-        }
+        if (ldAcc) readPromises.push(runNodelocBatch(userId, ldAcc.cookie, env, LD_BASE, false, 'LD').catch(e => {}));
+        await Promise.all(readPromises);
     }
 }
 
