@@ -1,0 +1,20 @@
+name: Set Cron Schedule
+on:
+  workflow_dispatch:
+    inputs:
+      schedule:
+        description: 'Cron schedule (e.g. "30 10 * * *")'
+        required: true
+        default: '0 * * * *'
+
+jobs:
+  set-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set cron schedule via CF API
+        run: |
+          curl -s -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/workers/scripts/glados-bot/schedules" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"schedules":[{"cron":"${{ github.event.inputs.schedule }}"}]}'
