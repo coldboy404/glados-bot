@@ -59,11 +59,10 @@ async function nlSaveState(userId, state, env, prefix = 'NL') {
 }
 
 // 刷新话题队列
-async function nlRefreshQueue(baseUrl, cookie, proxyUrl) {
-    const isProxy = !!proxyUrl;
-    const url = isProxy ? proxyUrl + '/latest.json?no_definitions=true&_cookie=' + encodeURIComponent(cookie) : baseUrl + '/latest.json?no_definitions=true';
-    const headers = isProxy ? { 'Accept': 'application/json' } : { 'User-Agent': NL_UAS[nlRand(0,NL_UAS.length-1)], 'Cookie': cookie, 'Accept': 'application/json' };
-    const r = await safeFetchTimeout(url, { headers }, 15000);
+async function nlRefreshQueue(baseUrl, cookie) {
+    const r = await safeFetchTimeout(baseUrl + '/latest.json?no_definitions=true', {
+        headers: { 'User-Agent': NL_UAS[nlRand(0,NL_UAS.length-1)], 'Cookie': cookie, 'Accept': 'application/json' }
+    }, 15000);
     if (!r || !r.ok) return [];
     const d = await r.json().catch(() => ({}));
     const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
@@ -71,31 +70,28 @@ async function nlRefreshQueue(baseUrl, cookie, proxyUrl) {
 }
 
 // 模拟阅读一帖（静默，不抛消息）
-async function nlReadTopic(baseUrl, cookie, topic, fast = false, proxyUrl) {
+async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
     await nlSleep(fast ? nlRand(500, 1500) : nlRand(5000, 15000));
     const ua = NL_UAS[nlRand(0, NL_UAS.length-1)];
-    var isProxy = !!proxyUrl;
-    var hdrs = {
+    const hdrs = {
         'User-Agent': ua,
+        'Cookie': cookie,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'Referer': baseUrl + '/',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache'
     };
-    if (!isProxy) hdrs['Cookie'] = cookie;
     // 页面 fetch best-effort，失败不阻断（从 cookie _t 拿 CSRF 兜底）
-    var topicUrl = isProxy ? proxyUrl + '/t/' + topic.id + '?_cookie=' + encodeURIComponent(cookie) : baseUrl + '/t/' + topic.id;
-    var resp = await safeFetchTimeout(topicUrl, { headers: hdrs }, 15000);
+    const resp = await safeFetchTimeout(baseUrl + '/t/' + topic.id, { headers: hdrs }, 15000);
     let csrf = '';
     if (resp && resp.ok) {
-        var html = await Promise.race([resp.text(), new Promise(function(r){setTimeout(function(){r('')},20000)})]);
+        const html = await Promise.race([resp.text(), new Promise(function(r){setTimeout(function(){r('')},20000)})]);
         csrf = (html.match(/csrf-token" content="([^"]+)"/) || [])[1];
         if (!csrf) {
-            var csrfUrl = isProxy ? proxyUrl + '/session/csrf?_cookie=' + encodeURIComponent(cookie) : baseUrl + '/session/csrf';
-            var csrfHdrs = { 'User-Agent': ua, 'Accept': 'application/json' };
-            if (!isProxy) csrfHdrs['Cookie'] = cookie;
-            var csrfResp = await safeFetchTimeout(csrfUrl, { headers: csrfHdrs }, 8000);
+            const csrfResp = await safeFetchTimeout(baseUrl + '/session/csrf', {
+                headers: { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' }
+            }, 8000);
             if (csrfResp && csrfResp.ok) {
                 try { const d = await csrfResp.json(); csrf = d.csrf || ''; } catch(e) {}
             }
@@ -110,20 +106,18 @@ async function nlReadTopic(baseUrl, cookie, topic, fast = false, proxyUrl) {
 
     if (csrf) {
         try {
-            var timingUrl = isProxy ? proxyUrl + '/t/' + topic.id + '/timings?_cookie=' + encodeURIComponent(cookie) : baseUrl + '/t/' + topic.id + '/timings';
-            var timingHdrs = {
-                'User-Agent': ua,
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': csrf,
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': baseUrl + '/t/' + topic.id,
-                'Origin': baseUrl
-            };
-            if (!isProxy) timingHdrs['Cookie'] = cookie;
-            await fetch(timingUrl, {
+            await fetch(baseUrl + '/t/' + topic.id + '/timings', {
                 method: 'POST',
-                headers: timingHdrs,
+                headers: {
+                    'User-Agent': ua,
+                    'Cookie': cookie,
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': csrf,
+                    'Accept': 'application/json, text/javascript, */*; q=0.01',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Referer': baseUrl + '/t/' + topic.id,
+                    'Origin': baseUrl
+                },
                 body: JSON.stringify({ timings: { 1: readTime }, topic_time: readTime })
             });
         } catch(e) {}
@@ -246,7 +240,7 @@ async function checkAndAlert(userId, state, prefix, env) {
 }
 
 // 主入口：每次 cron 触发，静默读多帖
-async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = false, statePrefix = 'NL', proxyUrl) {
+async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = false, statePrefix = 'NL') {
     if (!cookie) return;
     try {
         const state = await nlGetState(userId, env, statePrefix);
@@ -278,7 +272,7 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = fa
 
             // 确保队列有话题
             if (state.queue.length === 0) {
-                const topics = await nlRefreshQueue(baseUrl, cookie, proxyUrl);
+                const topics = await nlRefreshQueue(baseUrl, cookie);
                 if (topics.length === 0) {
                     state._lastError = '刷新队列返回空';
                     state.cookieError = 'CF 拦截或 cookie 失效';
@@ -382,22 +376,9 @@ export default {
             const diag = {
                 hasKV: typeof env.GLADOS_DB !== 'undefined',
                 hasAdminID: typeof env.ADMIN_ID !== 'undefined',
-                hasBotToken: typeof env.BOT_TOKEN !== 'undefined',
-                has_cf: false
+                hasBotToken: typeof env.BOT_TOKEN !== 'undefined'
             };
-            const userId = env.ADMIN_ID;
-            const accts = JSON.parse(await env.GLADOS_DB.get('USER_' + userId) || '[]');
-            const ldAcct = accts.find(a => a.domain === 'linux.do');
-            if (ldAcct && ldAcct.cookie) {
-                diag.has_cf = ldAcct.cookie.indexOf('cf_clearance') >= 0;
-                diag.cookie_preview = ldAcct.cookie.slice(0, 80) + '...';
-            }
             return new Response(JSON.stringify(diag, null, 2), { headers: { 'Content-Type': 'application/json' } });
-        }
-        if (url.pathname === '/testld') {
-            var r1 = await fetch('https://linux.do/latest.json',{headers:{'User-Agent':HEADERS['User-Agent'],'Accept':'application/json'},signal:AbortSignal.timeout(8000)});
-            var b1 = await r1.text().catch(function(){return 'BODY_FAIL'});
-            return new Response(JSON.stringify({latest_status: r1.status, len: b1.length, cf: (b1.indexOf('cf')>=0 ? 'cf detected' : 'no cf')}), {headers:{'Content-Type':'application/json'}});
         }
         // 根路径：自动激活 Webhook + 显示状态
         const setupResult = { webhook: false, commands: false };
@@ -657,13 +638,14 @@ async function handleCallback(callbackQuery, env, origin) {
 
         if (action === 'manage') {
             const isDiscourse = acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc' || acc.domain === 'linux.do';
-            var kbRows = [
-                [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` },
-                 { text: isDiscourse ? "📖 立即单独阅读" : "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
-                [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }, { text: "❌ 删除", callback_data: `del_acc_${index}` }],
-                [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
-            ];
-            const kb = { inline_keyboard: kbRows };
+            const kb = {
+                inline_keyboard: [
+                    [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` },
+                     { text: isDiscourse ? "📖 立即单独阅读" : "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
+                    [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }, { text: "❌ 删除此账户", callback_data: `del_acc_${index}` }],
+                    [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
+                ]
+            };
             await tgEdit(chatId, messageId, `⚙️ <b>管理账户</b>\n\n当前账户：<code>${maskEmail(acc.email || acc.username || '?', pref.showEmail)}</code>\n所属站点：<code>${acc.domain}</code>\n\n请选择操作：`, kb, env);
         } else if (action === 'exchange') {
             await showExchangePlans(chatId, messageId, index, acc, userId, env);
@@ -856,20 +838,12 @@ async function handleCallback(callbackQuery, env, origin) {
         }
         if (acc.domain === 'linux.do') {
             var mid = callbackQuery.message.message_id;
-            var mt = function(s) { return fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
+            var mt = function(s) { fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
             mt('📖 LD 手动阅读\n───────');
             try {
-                var ac = new AbortController(), acTm = setTimeout(function(){ac.abort()},20000);
-                var ldUrl, ldOpts;
-                if (acc.proxyUrl) {
-                    ldUrl = acc.proxyUrl + '/latest.json?no_definitions=true&_cookie=' + encodeURIComponent(acc.cookie);
-                    ldOpts = { signal: ac.signal };
-                } else {
-                    ldUrl = 'https://linux.do/latest.json?no_definitions=true';
-                    ldOpts = { headers: {'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json','Accept-Language':'zh-CN,zh;q=0.9,en;q=0.8','Sec-CH-UA':'"Chromium";v="120","Google Chrome";v="120"','Sec-CH-UA-Mobile':'?0','Sec-CH-UA-Platform':'"Windows"'}, signal: ac.signal };
-                }
-                var r1 = await fetch(ldUrl, ldOpts);
-                if(!r1.ok){ clearTimeout(acTm); await mt(acc.proxyUrl ? '❌ Sidecar proxy 错误 '+r1.status : '❌ CF 拦截 linux.do (403) — 需配置 Sidecar Proxy 或重新抓取完整 cookie'); return; }
+                var ac = new AbortController(), acTm = setTimeout(function(){ac.abort()},12000);
+                var r1 = await fetch('https://linux.do/latest.json?no_definitions=true',{headers:{'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json'},signal:ac.signal});
+                if(!r1.ok){ clearTimeout(acTm); mt('❌ 话题列表 '+r1.status); return; }
                 var d1 = await r1.json().catch(function(){return{}});
                 clearTimeout(acTm);
                 var allTopics = (d1.topic_list?.topics||[]).filter(function(t){return !t.pinned&&t.id});
@@ -1214,11 +1188,9 @@ async function processUpdateCookie(chatId, userId, text, env) {
     
     accounts[index].cookie = text.trim();
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
-    
     const isDiscourse = accounts[index].domain === 'nodeloc.com' || accounts[index].domain === 'nodeseek.cc' || accounts[index].domain === 'linux.do';
     if (isDiscourse) {
-        const siteName = accounts[index].domain === 'linux.do' ? '🐧 LinuxDO' : accounts[index].domain === 'nodeseek.cc' ? '🔹 NodeSeek' : '🌐 NodeLoc';
-        await tgSend(chatId, `✅ Cookie 更新成功！请使用手动阅读测试。`, env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
+        await tgSend(chatId, "✅ Cookie 更新成功！请使用手动阅读测试。", env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
         return;
     }
     
@@ -1452,7 +1424,7 @@ async function handleScheduled(env) {
         const nsAcc = accounts.find(a => a.domain === 'nodeseek.cc' && a.cookie);
         if (nsAcc) readPromises.push(runNodelocBatch(userId, nsAcc.cookie, env, NS_BASE, false, 'NS').catch(e => {}));
         const ldAcc = accounts.find(a => a.domain === 'linux.do' && a.cookie);
-        if (ldAcc) readPromises.push(runNodelocBatch(userId, ldAcc.cookie, env, LD_BASE, false, 'LD', ldAcc.proxyUrl).catch(e => {}));
+        if (ldAcc) readPromises.push(runNodelocBatch(userId, ldAcc.cookie, env, LD_BASE, false, 'LD').catch(e => {}));
         await Promise.all(readPromises);
     }
 }
