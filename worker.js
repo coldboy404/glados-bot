@@ -444,7 +444,12 @@ async function handleCallback(callbackQuery, env, origin) {
     const messageId = callbackQuery.message.message_id;
     const userId = String(callbackQuery.from.id);
     const data = callbackQuery.data;
-
+    // 辅助：在同一个菜单消息上编辑，不刷屏
+    var rp = function(t, k) { return tgEdit(chatId, messageId, t, k || null, env); };
+    
+    // 存储当前菜单消息 ID，供后续文本回复编辑
+    await env.GLADOS_DB.put(`MSGID_${userId}`, String(messageId), { expirationTtl: 600 });
+    
     await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/answerCallbackQuery`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callback_query_id: callbackQuery.id })
     });
@@ -472,14 +477,14 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'view_all_accounts') {
         const accounts = await getAccounts(userId, env);
-        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        if (accounts.length === 0) return rp("❌ 您还没添加任何账号。");
         await tgEdit(chatId, messageId, "⏳ <b>正在获取全部账户信息...</b>\n\n<i>(系统将全自动查询，请稍候)</i>", null, env);
         await executeTask({ type: 'view_all', chatId, userId, startIndex: 0, plan: null, successList: [] }, env, origin);
     }
     // --- 单个账户管理 ---
     else if (data === 'list_manage') {
         const accounts = await getAccounts(userId, env);
-        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        if (accounts.length === 0) return rp("❌ 您还没添加任何账号。");
         await showAccountList(chatId, messageId, userId, 'manage', env);
     }
     // --- 积分兑换 ---
@@ -507,7 +512,7 @@ async function handleCallback(callbackQuery, env, origin) {
     else if (data.startsWith('batch_exch_')) {
         const plan = data.split('_')[2]; 
         const accounts = await getAccounts(userId, env);
-        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        if (accounts.length === 0) return rp("❌ 您还没添加任何账号。");
         
         await tgEdit(chatId, messageId, `⏳ <b>正在执行统一批量兑换，请稍候...</b>`, null, env);
         await executeTask({ type: 'batch_exchange', chatId, userId, startIndex: 0, plan, successList: [] }, env, origin);
@@ -525,7 +530,7 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'do_sub_all') {
         const accounts = await getAccounts(userId, env);
-        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        if (accounts.length === 0) return rp("❌ 您还没添加任何账号。");
         await tgEdit(chatId, messageId, "⏳ <b>正在批量获取全部账户的订阅链接，请稍候...</b>", null, env);
         await executeTask({ type: 'sub_all', chatId, userId, startIndex: 0, plan: null, successList: [] }, env, origin);
     }
@@ -543,13 +548,13 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'do_checkin') {
         const accounts = await getAccounts(userId, env);
-        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        if (accounts.length === 0) return rp("❌ 您还没添加任何账号。");
         await tgEdit(chatId, messageId, "⏳ <b>正在执行统一批量签到...</b>", null, env);
         await executeTask({ type: 'checkin', chatId, userId, startIndex: 0, plan: null, successList: [] }, env, origin);
     }
     else if (data === 'set_cron_time') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_CRON_TIME', { expirationTtl: 120 });
-        await tgSend(chatId, "⏰ <b>请回复数字 (0-23)</b>\n\n⚠️ 必须为整点！\n例如输入 <code>12</code> 代表每天中午 12:00 左右签到\n<i>(系统具有±10分钟容错，防止漏签)</i>", env);
+        await rp("⏰ <b>请回复数字 (0-23)</b>\n\n⚠️ 必须为整点！\n例如输入 <code>12</code> 代表每天中午 12:00 左右签到\n<i>(系统具有±10分钟容错，防止漏签)</i>");
     }
     // --- 其他辅助 ---
     else if (data === 'add_account') {
@@ -567,18 +572,18 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'site_add') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NEW_SITE', { expirationTtl: 120 });
-        await tgSend(chatId, "🌐 <b>请输入新增的网址</b>\n\n例如：<code>https://glados.network</code>", env);
+        await rp("🌐 <b>请输入新增的网址</b>\n\n例如：<code>https://glados.network</code>");
     }
     else if (data === 'site_del_menu') {
         const customSites = await getCustomSites(userId, env);
         if (customSites.length === 0) {
-            return tgSend(chatId, "❌ 您还没有添加任何自定义网站。", env);
+            return rp("❌ 您还没有添加任何自定义网站。");
         }
         let msg = "🗑️ <b>请回复要删除的网站序号：</b>\n\n";
         customSites.forEach((site, i) => msg += `${i + 1}. <code>${site}</code>\n`);
         
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_DELETE_SITE', { expirationTtl: 120 });
-        await tgSend(chatId, msg, env);
+        await rp(msg);
     }
     else if (data.startsWith('selsite_')) {
         const index = parseInt(data.split('_')[1]);
@@ -586,12 +591,12 @@ async function handleCallback(callbackQuery, env, origin) {
         const allSites = [...DEFAULT_SITES, ...customSites];
         const selectedSite = allSites[index];
 
-        if (!selectedSite) return tgSend(chatId, "❌ 站点异常", env);
+        if (!selectedSite) return rp("❌ 站点异常");
 
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_ACCOUNT_INFO', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, selectedSite, { expirationTtl: 300 });
         const msg = `📝 您选择了站点: <b>${selectedSite}</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱:cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
-        await tgSend(chatId, msg, env);
+        await rp(msg);
     }
     else if (data === 'clear_all_confirm') {
         const kb = { inline_keyboard: [[{ text: "⚠️ 确认清空 (不可恢复)", callback_data: "clear_all_yes" }], [{ text: "🔙 取消返回", callback_data: "list_manage" }]] };
@@ -614,7 +619,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const acc = accounts[index];
         const pref = await getPref(userId, env);
         
-        if (!acc) return tgSend(chatId, "❌ 找不到该账号", env);
+        if (!acc) return rp("❌ 找不到该账号");
 
         if (action === 'manage') {
             const isDiscourse = acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc';
@@ -630,16 +635,16 @@ async function handleCallback(callbackQuery, env, origin) {
         } else if (action === 'exchange') {
             await showExchangePlans(chatId, messageId, index, acc, userId, env);
         } else if (action === 'sub') {
-            await tgSend(chatId, `🔗 正在获取 <code>${maskEmail(acc.email, pref.showEmail)}</code> 的订阅，请稍候...`, env);
+            await rp(`🔗 正在获取 <code>${maskEmail(acc.email, pref.showEmail)}</code> 的订阅，请稍候...`);
             const subData = await getSubAndHost(acc.domain, acc.cookie);
-            await tgSend(chatId, subData, env);
+            await rp(subData);
         }
     }
     else if (data.startsWith('view_acc_')) {
         const index = parseInt(data.split('_')[2]);
         const accounts = await getAccounts(userId, env);
         const acc = accounts[index];
-        if (!acc) return tgSend(chatId, "❌ 账号不存在", env);
+        if (!acc) return rp("❌ 账号不存在");
         
         if (acc.domain === 'nodeloc.com') {
             const pref = await getPref(userId, env);
@@ -664,7 +669,7 @@ async function handleCallback(callbackQuery, env, origin) {
             } else {
                 msg += `⏳ 状态: 等待下次定时运行\n`;
             }
-            return tgSend(chatId, msg, env);
+            return rp(msg);
         }
         if (acc.domain === 'nodeseek.cc') {
             const pref = await getPref(userId, env);
@@ -689,20 +694,20 @@ async function handleCallback(callbackQuery, env, origin) {
             } else {
                 msg += `⏳ 状态: 等待下次定时运行\n`;
             }
-            return tgSend(chatId, msg, env);
+            return rp(msg);
         }
         
-        await tgSend(chatId, "⏳ 正在拉取该账号信息...", env);
+        await rp("⏳ 正在拉取该账号信息...");
         const pref = await getPref(userId, env);
         const accData = await getAccountDataObj(acc, false);
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
-        await tgSend(chatId, msgStr, env);
+        await rp(msgStr);
     }
     else if (data.startsWith('rd_acc_') || data.startsWith('chk_acc_')) {
         const index = parseInt(data.split('_')[2]);
         const accounts = await getAccounts(userId, env);
         const acc = accounts[index];
-        if (!acc) return tgSend(chatId, "❌ 账号不存在", env);
+        if (!acc) return rp("❌ 账号不存在");
         
         if (acc.domain === 'nodeloc.com') {
             var mid = callbackQuery.message.message_id;
@@ -791,16 +796,16 @@ async function handleCallback(callbackQuery, env, origin) {
             }
             return;
         }
-        await tgSend(chatId, "⏳ 正在为您单独执行签到，请稍候...", env);
+        await rp("⏳ 正在为您单独执行签到，请稍候...");
         const pref = await getPref(userId, env);
         const accData = await getAccountDataObj(acc, true); // true 代表触发签到
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
-        await tgSend(chatId, msgStr, env);
+        await rp(msgStr);
     }
     else if (data.startsWith('del_acc_')) {
         const index = parseInt(data.split('_')[2]);
         let accounts = await getAccounts(userId, env);
-        if (!accounts[index]) return tgSend(chatId, "❌ 账号不存在", env);
+        if (!accounts[index]) return rp("❌ 账号不存在");
         const deletedEmail = accounts[index].email;
         accounts.splice(index, 1);
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
@@ -813,17 +818,17 @@ async function handleCallback(callbackQuery, env, origin) {
         const index = parseInt(data.split('_')[2]);
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_UPDATE_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, index.toString(), { expirationTtl: 300 });
-        await tgSend(chatId, `🔁 <b>请直接回复新的 Cookie 内容：</b>`, env);
+        await rp(`🔁 <b>请直接回复新的 Cookie 内容：</b>`);
     }
     else if (data === 'add_nodeloc') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODELOC_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeloc.com', { expirationTtl: 300 });
-        await tgSend(chatId, "🌐 <b>绑定 NodeLoc 账号</b>\n\n打开 https://www.nodeloc.com → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", env, { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
+        await rp("🌐 <b>绑定 NodeLoc 账号</b>\n\n打开 https://www.nodeloc.com → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
     }
     else if (data === 'add_nodeseek') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODESEEK_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeseek.cc', { expirationTtl: 300 });
-        await tgSend(chatId, "🔹 <b>绑定 NodeSeek 账号</b>\n\n打开 https://nodeseek.cc → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", env, { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
+        await rp("🔹 <b>绑定 NodeSeek 账号</b>\n\n打开 https://nodeseek.cc → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
     }
     else if (data === 'bind_ns') {
     }
@@ -835,7 +840,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const acc = accounts[index];
         const pref = await getPref(userId, env);
         
-        await tgSend(chatId, `⏳ 正在为您兑换套餐，请稍候...`, env);
+        await rp(`⏳ 正在为您兑换套餐，请稍候...`);
         const result = await safeFetchJson(`https://${acc.domain}/api/user/exchange`, {
             method: 'POST', headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` },
             body: JSON.stringify({ planType: plan })
@@ -844,7 +849,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const accData = await getAccountDataObj(acc, false); 
         accData.statusMsg = (result && result.message) ? `✅ ${result.message}` : '✅ 兑换操作完成';
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, false);
-        await tgSend(chatId, msgStr, env);
+        await rp(msgStr);
     }
 }
 
@@ -927,30 +932,33 @@ async function diagnoseNodeseek(userId, env) {
 async function processAddAccountInfo(chatId, userId, text, env) {
     const state = await env.GLADOS_DB.get(`STATE_${userId}`);
     const domain = await env.GLADOS_DB.get(`TEMP_${userId}`);
+    const msgId = await env.GLADOS_DB.get(`MSGID_${userId}`);
     await env.GLADOS_DB.delete(`STATE_${userId}`);
     await env.GLADOS_DB.delete(`TEMP_${userId}`);
-    if (!domain) return tgSend(chatId, "❌ 会话过期，请重新选择站点。", env);
+    await env.GLADOS_DB.delete(`MSGID_${userId}`);
+    const rp = function(t, k) { return tgEdit(chatId, parseInt(msgId), t, k || null, env); };
+    if (!domain) return rp("❌ 会话过期，请重新选择站点。");
 
     // NodeLoc: 直接发 cookie，bot 自动提取用户名
     if (state === 'AWAITING_NODELOC_COOKIE') {
         let cookie = text.trim();
         if (!/_forum_session=/.test(cookie)) {
-            return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
+            return rp("❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。");
         }
         const userInfo = await fetchDiscourseUser(cookie, NL_BASE);
-        if (!userInfo) return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录 NodeLoc 后重新抓取。", env);
+        if (!userInfo) return rp("❌ 无法验证 Cookie，请确认已登录 NodeLoc 后重新抓取。");
         let accounts = await getAccounts(userId, env);
         // 去重：同一 _forum_session 不重复绑定
         const sessionMatch = cookie.match(/_forum_session=([^;]+)/);
         const sessionVal = sessionMatch ? sessionMatch[1] : null;
         const exists = accounts.some(a => a.domain === 'nodeloc.com' && a.cookie && a.cookie.includes(sessionVal));
-        if (exists) return tgSend(chatId, `ℹ️ 该账号已绑定（<code>${userInfo.email || userInfo.username}</code>），无需重复操作。`, env);
+        if (exists) return rp(`ℹ️ 该账号已绑定（<code>${userInfo.email || userInfo.username}</code>），无需重复操作。`);
         accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeloc.com', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nlTotal = accounts.filter(a => a.domain === 'nodeloc.com').length;
-        await tgSend(chatId, `✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个`, env);
+        await rp(`✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个`);
         return;
     }
 
@@ -958,21 +966,21 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     if (state === 'AWAITING_NODESEEK_COOKIE') {
         let cookie = text.trim();
         if (!/_forum_session=/.test(cookie)) {
-            return tgSend(chatId, "❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。", env);
+            return rp("❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。");
         }
         const userInfo = await fetchDiscourseUser(cookie, NS_BASE);
-        if (!userInfo) return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录 NodeSeek 后重新抓取。", env);
+        if (!userInfo) return rp("❌ 无法验证 Cookie，请确认已登录 NodeSeek 后重新抓取。");
         let accounts = await getAccounts(userId, env);
         const sessionMatch = cookie.match(/_forum_session=([^;]+)/);
         const sessionVal = sessionMatch ? sessionMatch[1] : null;
         const exists = accounts.some(a => a.domain === 'nodeseek.cc' && a.cookie && a.cookie.includes(sessionVal));
-        if (exists) return tgSend(chatId, `ℹ️ 该账号已绑定（<code>${userInfo.email || userInfo.username}</code>），无需重复操作。`, env);
+        if (exists) return rp(`ℹ️ 该账号已绑定（<code>${userInfo.email || userInfo.username}</code>），无需重复操作。`);
         accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeseek.cc', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
         const total = accounts.length;
         const nsTotal = accounts.filter(a => a.domain === 'nodeseek.cc').length;
-        await tgSend(chatId, `✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`, env);
+        await rp(`✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`);
         return;
     }
 
@@ -998,9 +1006,9 @@ async function processAddAccountInfo(chatId, userId, text, env) {
             await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
             await saveUserIdForCron(userId, env);
             const total = accounts.filter(a => a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc').length;
-            return tgSend(chatId, `✅ <b>GLaDOS 绑定成功！</b>\n\n👤 账号: <code>${found.email}</code>\n🔗 域名: <code>${found.domain}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n💡 如需手动绑定，使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式。`, env);
+            return rp(`✅ <b>GLaDOS 绑定成功！</b>\n\n👤 账号: <code>${found.email}</code>\n🔗 域名: <code>${found.domain}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n💡 如需手动绑定，使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式。`);
         }
-        return tgSend(chatId, "❌ 无法验证 Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式手动绑定。", env);
+        return rp("❌ 无法验证 Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式手动绑定。");
     }
 
     const lines = text.split('\n');
@@ -1028,8 +1036,8 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     await saveUserIdForCron(userId, env);
 
     let resultMsg = `✅ <b>导入完毕！(全局防重生效)</b>\n\n➕ 新增账号: ${added} 个\n🔁 覆盖更新: ${updated} 个\n📦 当前总账号数: ${accounts.length} 个`;
-    await tgSend(chatId, resultMsg, env);
-    await tgSend(chatId, "👇", env, { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] });
+    await rp(resultMsg);
+    await rp("👇", { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] });
 }
 
 async function processUpdateCookie(chatId, userId, text, env) {
@@ -1037,24 +1045,24 @@ async function processUpdateCookie(chatId, userId, text, env) {
     await env.GLADOS_DB.delete(`STATE_${userId}`);
     await env.GLADOS_DB.delete(`TEMP_${userId}`);
 
-    if (!indexStr) return tgSend(chatId, "❌ 会话过期。", env);
+    if (!indexStr) return rp("❌ 会话过期。");
     const index = parseInt(indexStr);
     const accounts = await getAccounts(userId, env);
-    if (!accounts[index]) return tgSend(chatId, "❌ 账号不存在", env);
+    if (!accounts[index]) return rp("❌ 账号不存在");
     
     accounts[index].cookie = text.trim();
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     const isDiscourse = accounts[index].domain === 'nodeloc.com' || accounts[index].domain === 'nodeseek.cc';
     if (isDiscourse) {
-        await tgSend(chatId, "✅ Cookie 更新成功！请使用手动阅读测试。", env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
+        await rp("✅ Cookie 更新成功！请使用手动阅读测试。", { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
         return;
     }
     
-    await tgSend(chatId, "✅ Cookie 更新成功！正在为您验证签到状态...", env);
+    await rp("✅ Cookie 更新成功！正在为您验证签到状态...");
     const pref = await getPref(userId, env);
     const data = await getAccountDataObj(accounts[index], true);
     const msgStr = formatAccountString(accounts[index], index + 1, accounts.length, pref, data, true, true);
-    await tgSend(chatId, msgStr, env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
+    await rp(msgStr, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
 }
 
 async function processNewSite(chatId, userId, text, env) {
