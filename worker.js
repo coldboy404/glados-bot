@@ -1024,6 +1024,7 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeloc.com', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
+        await clearDiscourseState(userId, 'nodeloc.com', env);
         const total = accounts.length;
         const nlTotal = accounts.filter(a => a.domain === 'nodeloc.com').length;
         await rp(`✅ <b>NodeLoc 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🌐 NodeLoc 账号: ${nlTotal} 个\n📦 当前总账号数: ${total} 个`);
@@ -1046,6 +1047,7 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeseek.cc', cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
+        await clearDiscourseState(userId, 'nodeseek.cc', env);
         const total = accounts.length;
         const nsTotal = accounts.filter(a => a.domain === 'nodeseek.cc').length;
         await rp(`✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`);
@@ -1102,10 +1104,24 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     accounts = Array.from(accMap.values());
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     await saveUserIdForCron(userId, env);
+    if (domain === 'nodeloc.com' || domain === 'nodeseek.cc') {
+        await clearDiscourseState(userId, domain, env);
+    }
 
     let resultMsg = `✅ <b>导入完毕！(全局防重生效)</b>\n\n➕ 新增账号: ${added} 个\n🔁 覆盖更新: ${updated} 个\n📦 当前总账号数: ${accounts.length} 个`;
     await rp(resultMsg);
     await rp("👇", { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] });
+}
+
+async function clearDiscourseState(userId, domain, env) {
+    const prefix = domain === 'nodeloc.com' ? 'NL' : 'NS';
+    let state = await env.GLADOS_DB.get(prefix + '_STATE_' + userId, 'json');
+    if (state) {
+        state.cookieError = '';
+        state.failCount = 0;
+        if (state._lastError) delete state._lastError;
+        await env.GLADOS_DB.put(prefix + '_STATE_' + userId, JSON.stringify(state));
+    }
 }
 
 async function processUpdateCookie(chatId, userId, text, env) {
@@ -1120,8 +1136,10 @@ async function processUpdateCookie(chatId, userId, text, env) {
     
     accounts[index].cookie = text.trim();
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
-    const isDiscourse = accounts[index].domain === 'nodeloc.com' || accounts[index].domain === 'nodeseek.cc';
+    const domain = accounts[index].domain;
+    const isDiscourse = domain === 'nodeloc.com' || domain === 'nodeseek.cc';
     if (isDiscourse) {
+        await clearDiscourseState(userId, domain, env);
         await rp("✅ Cookie 更新成功！请使用手动阅读测试。", { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
         return;
     }
