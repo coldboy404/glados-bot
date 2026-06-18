@@ -58,14 +58,39 @@ async function nlSaveState(userId, state, env, prefix = 'NL') {
 }
 
 // 刷新话题队列
-async function nlRefreshQueue(baseUrl, cookie) {
-    const r = await safeFetchTimeout(baseUrl + '/latest.json?no_definitions=true', {
-        headers: { 'User-Agent': NL_UAS[nlRand(0,NL_UAS.length-1)], 'Cookie': cookie, 'Accept': 'application/json' }
-    }, 15000);
-    if (!r || !r.ok) return [];
-    const d = await r.json().catch(() => ({}));
-    const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
-    return topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id }));
+async function nlRefreshQueue(baseUrl, cookie, state) {
+    const ua = NL_UAS[nlRand(0,NL_UAS.length-1)];
+    const hdrs = { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' };
+    
+    // 1. Try /unread.json — topics with unread posts
+    let r = await safeFetchTimeout(baseUrl + '/unread.json', { headers: hdrs }, 10000);
+    if (r && r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
+        if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'unread' };
+    }
+    
+    // 2. Try /new.json — brand new topics
+    r = await safeFetchTimeout(baseUrl + '/new.json', { headers: hdrs }, 10000);
+    if (r && r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
+        if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'new' };
+    }
+    
+    // 3. If both empty, check if all latest topics have been read
+    if (state?.readTopicIds?.length > 0) {
+        r = await safeFetchTimeout(baseUrl + '/latest.json?no_definitions=true', { headers: hdrs }, 10000);
+        if (r && r.ok) {
+            const d = await r.json().catch(() => ({}));
+            const allLatest = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
+            if (allLatest.length > 0 && allLatest.every(t => state.readTopicIds.includes(t.id))) {
+                return { topics: [], source: 'allRead' };
+            }
+        }
+    }
+    
+    return { topics: [], source: 'empty' };
 }
 
 // 模拟阅读一帖（静默，不抛消息）
@@ -219,6 +244,18 @@ async function checkAndAlert(userId, state, prefix, env) {
             })
         }).catch(function(){});
     }
+    if (state.allRead && !state.allReadNotified) {
+        state.allReadNotified = true;
+        const name = SITE_NAMES[prefix] || prefix;
+        fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: env.ADMIN_ID,
+                text: '🏁 <b>' + name + ' 全部话题已阅读完毕</b>\n暂无新话题，Bot 继续待命。',
+                parse_mode: 'HTML'
+            })
+        }).catch(function(){});
+    }
 }
 
 // 主入口：每次 cron 触发，静默读多帖
@@ -254,19 +291,24 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = fa
 
             // 确保队列有话题
             if (state.queue.length === 0) {
-                const topics = await nlRefreshQueue(baseUrl, cookie);
-                if (topics.length === 0) {
+                const res = await nlRefreshQueue(baseUrl, cookie, state);
+                if (res.source === 'allRead') {
+                    state._lastError = '全站话题已读完';
+                    state.allRead = true;
+                    break;
+                }
+                if (res.topics.length === 0) {
                     state._lastError = '刷新队列返回空';
                     state.cookieError = 'CF 拦截或 cookie 失效';
                     state.failCount = (state.failCount || 0) + 1;
                     break;
                 }
                 // shuffle
-                for (let i = topics.length - 1; i > 0; i--) {
+                for (let i = res.topics.length - 1; i > 0; i--) {
                     const j = Math.floor(Math.random() * (i + 1));
-                    [topics[i], topics[j]] = [topics[j], topics[i]];
+                    [res.topics[i], res.topics[j]] = [res.topics[j], res.topics[i]];
                 }
-                state.queue = topics;
+                state.queue = res.topics;
             }
 
             const topic = state.queue.shift();
@@ -287,6 +329,10 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = fa
                 state.readsToday = (state.readsToday || 0) + 1;
                 state.readTotal = (state.readTotal || 0) + 1;
                 state.totalReadTime = (state.totalReadTime || 0) + result.readTime;
+                if (!state.readTopicIds) state.readTopicIds = [];
+                if (topic && topic.id && !state.readTopicIds.includes(topic.id)) {
+                    state.readTopicIds.push(topic.id);
+                }
             }
             state.lastRead = now;
             state.cookieError = '';
