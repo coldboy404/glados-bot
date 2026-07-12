@@ -171,37 +171,17 @@ function nodelocToday() {
 async function runNodelocCheckin(cookie) {
     const cleanCookie = normalizeCookie(cookie);
     if (!getCookieValue(cleanCookie, '_forum_session')) return { ok: false, cookieError: '缺少 _forum_session', message: 'Cookie 格式不完整' };
-    // Discourse 通常把当前会话的 CSRF Token 放在 Cookie 的 _t 中。
-    // 优先使用 _t，避免 /session/csrf.json 响应下发的新 Set-Cookie 与用户原会话不匹配。
-    let csrf = '';
-    const csrfCookie = getCookieValue(cleanCookie, '_t');
-    if (csrfCookie) {
-        try { csrf = decodeURIComponent(csrfCookie); } catch (e) { csrf = csrfCookie; }
-    }
-    if (!csrf) {
-        const csrfResponse = await safeFetchTimeout(NL_BASE + '/session/csrf.json', {
-            headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cleanCookie, 'Accept': 'application/json', 'Referer': NL_BASE + '/' }
-        }, 10000);
-        if (!csrfResponse) return { ok: false, message: '获取 CSRF 超时' };
-        if (csrfResponse.status === 401) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
-        const csrfData = await csrfResponse.json().catch(function() { return {}; });
-        csrf = csrfData.csrf || '';
-    }
-    if (!csrf) return { ok: false, message: 'Cookie 中没有 _t，且未取得 CSRF Token' };
 
+    // NodeLoc 的 discourse_checkin 路由支持 GET。使用 GET 可避免 POST 的 CSRF 会话不匹配，
+    // 同时能读取“今日已签到”状态；匿名 GET 会明确返回 not_logged_in。
     const response = await safeFetchTimeout(NL_BASE + '/checkin.json', {
-        method: 'POST',
+        method: 'GET',
         headers: {
             'User-Agent': HEADERS['User-Agent'],
             'Cookie': cleanCookie,
-            'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*',
-            'Origin': NL_BASE,
-            'Referer': NL_BASE + '/',
-            'X-CSRF-Token': csrf,
-            'X-Requested-With': 'XMLHttpRequest'
-        },
-        body: JSON.stringify({})
+            'Referer': NL_BASE + '/'
+        }
     }, 12000);
     if (!response) return { ok: false, message: '签到请求超时' };
     const raw = await response.text();
@@ -410,6 +390,13 @@ async function handleMessage(message, env, origin) {
 
     if (text === '/start') {
         await env.GLADOS_DB.delete(`STATE_${userId}`);
+        // 每次 /start 都同步 Telegram 命令菜单，清除历史命令，只保留 /start。
+        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMyCommands`, { method: 'POST' }).catch(function(){});
+        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ commands: [{ command: 'start', description: '启动机器人' }] })
+        }).catch(function(){});
         await sendMainMenu(chatId, userId, env);
         return;
     }
