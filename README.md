@@ -1,4 +1,4 @@
-# GLaDOS 签到 + Discourse 多站摸鱼 Bot ☁️
+# GLaDOS / NodeLoc / NodeSeek 多站自动签到 Bot ☁️
 
 Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cookie 管理和健康监控。
 
@@ -6,7 +6,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 - **GLaDOS 签到** — 多账号每天自动签到；所有 GLaDOS 域名统一为一个账户入口，自动回退可用域名。
 - **NodeLoc / NodeSeek 签到** — 与 GLaDOS 使用同一签到时间；支持立即单独签到。
-- **Cookie 自动识别** — NodeSeek 从 `koa:sess` 自动读取用户 ID；GLaDOS 自动从 Cookie 查询账户邮箱，并按邮箱更新去重。
+- **Cookie 自动识别** — NodeSeek 从 `pjwt` 自动读取用户 ID/昵称；GLaDOS 从 `koa:sess` 查询账户邮箱，并按邮箱更新去重。
 - **健康监控** — 菜单显示各站状态；Cookie 失效自动标红，连续失败主动推送告警。
 - **Telegram 管理** — 绑定账号、看状态、手动签到，都在对话框完成。
 
@@ -14,7 +14,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 点这个按钮，授权 GitHub + Cloudflare，填 `BOT_TOKEN` 跟 `ADMIN_ID`：
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Linsars/glados-discourse-bot)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/coldboy404/glados-discourse-bot)
 
 部署完访问 worker 域名（`https://xxx.workers.dev/`）自动激活 webhook，返回 `{"webhook":"✅ 已激活","commands":"✅ 已注册"}` 即可。
 
@@ -22,7 +22,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 ### 自动部署更新
 
-[![Auto Deploy](https://github.com/Linsars/glados-discourse-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/Linsars/glados-discourse-bot/actions/workflows/deploy.yml)
+[![Auto Deploy](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml)
 
 设好以下 Secret 后，每次推 `worker.js` 到 `main` 自动更新 CF 上的代码，不需要再手动重新部署：
 

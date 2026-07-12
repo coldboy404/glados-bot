@@ -1,4 +1,4 @@
-// GLaDOS Bot + Discourse 多站自动阅读 - https://github.com/Linsars/glados-discourse-bot
+// GLaDOS / NodeLoc / NodeSeek 多站自动签到 Bot
 
 const VIP_MAP = { 0: "Free", 10: "Free", 11: "Edu", 21: "Basic", 31: "Pro", 41: "Team", 51: "Enterprise" };
 const LIMIT_MAP = { 0: 10, 10: 10, 11: 100, 21: 200, 31: 500, 41: 2000, 51: 5000 };
@@ -29,7 +29,8 @@ async function safeFetchTimeout(url, opts, ms = 12000) {
 
 // ================= NodeLoc 阅读/签到 + NodeSeek 签到 =================
 const NL_BASE = 'https://www.nodeloc.com';
-const NS_BASE = 'https://www.nodeseek.com';
+// NodeSeek 主站是 nodeseek.com；不要把 Cookie 请求发到 www 子域名。
+const NS_BASE = 'https://nodeseek.com';
 const NL_UAS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -113,6 +114,21 @@ function gladosRequestDomains(acc) {
     return [preferred].concat(GLADOS_DOMAINS.filter(function(domain) { return domain !== preferred; }));
 }
 
+function gladosBusinessAuthFailure(result) {
+    if (!result || typeof result !== 'object') return true;
+    const code = result.code;
+    const text = JSON.stringify(result).toLowerCase();
+    return code === -2 || code === -401 || code === 401 || /not\s*logged?\s*in|not.?login|unauthorized|permission|expired|登录|过期|无权限|未授权/.test(text);
+}
+
+function gladosCheckinSucceeded(result) {
+    if (!result || typeof result !== 'object' || gladosBusinessAuthFailure(result)) return false;
+    if (result.success === true || result.ok === true) return true;
+    if (result.code !== undefined) return result.code === 0;
+    const text = String(result.message || result.msg || '').toLowerCase();
+    return /check.?in|success|成功|已签到|签到完成|observation logged|tomorrow/.test(text) && !/fail|error|失败|错误|无权限|登录/.test(text);
+}
+
 async function gladosFetchJson(acc, path, options) {
     const opts = options || {};
     for (const domain of gladosRequestDomains(acc)) {
@@ -120,7 +136,13 @@ async function gladosFetchJson(acc, path, options) {
             ...opts,
             headers: { ...HEADERS, ...(opts.headers || {}), 'cookie': acc.cookie, 'origin': 'https://' + domain }
         });
-        if (result) return { data: result, domain };
+        if (!result) continue;
+        // 统一域名后，首个域名可能返回业务层 Cookie 失效 JSON；只有业务成功或非认证业务错误才停止。
+        // 这样旧域名 Cookie 仍能回退到原来可用的域名。
+        const isStatusLike = /\/api\/user\/(status|info|traffic|points)/.test(path);
+        if (isStatusLike && result.code !== undefined && result.code !== 0 && gladosBusinessAuthFailure(result)) continue;
+        if (path.endsWith('/checkin') && gladosBusinessAuthFailure(result)) continue;
+        return { data: result, domain };
     }
     return { data: null, domain: acc.domain || GLADOS_DOMAIN };
 }
@@ -168,19 +190,23 @@ async function runNodelocCheckin(cookie) {
     if (!response) return { ok: false, message: '签到请求超时' };
     const raw = await response.text();
     const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
-    const message = data.message || data.msg || raw.slice(0, 100) || ('HTTP ' + response.status);
-    // 403 在 NodeLoc 签到插件中表示当日已签到（而非未登录）；仅 401 视为 Cookie 失效。
-    const already = response.status === 403 || /already|已签|重复|today/i.test(message);
-    const cookieError = response.status === 401 ? '未登录' : '';
-    const ok = response.status === 403 || (response.ok && data.success !== false) || already;
+    const errorType = String(data.error_type || '').toLowerCase();
+    const message = data.message || data.msg || data.errors?.[0] || raw.slice(0, 120) || ('HTTP ' + response.status);
+    // NodeLoc 的 403 可能是“已签到”、未登录或 BAD CSRF，必须看 body，不能按状态码一概而论。
+    const already = /already|已签|重复|今天已|今日已|today/i.test(String(message)) || /already|已签|重复|今天已|今日已|today/i.test(raw);
+    const notLoggedIn = response.status === 401 || errorType === 'not_logged_in' || /需要登录|not_logged_in|unauthorized/i.test(String(message)) || /需要登录|not_logged_in|unauthorized/i.test(raw);
+    const badCsrf = /bad csrf|csrf/i.test(String(message)) || /bad csrf|csrf/i.test(raw);
+    // Cloudflare HTML 403、未登录 JSON、BAD CSRF 都不能误判为“今日已签到”；只有明确的重复签到文案才算 already。
+    const cookieError = notLoggedIn ? '未登录' : '';
+    const ok = already || (response.ok && data.success !== false && !badCsrf && !notLoggedIn);
     return { ok, already, points: data.points || data.gain || '', message, cookieError };
 }
 
 async function runNodeseekCheckin(cookie) {
     const cleanCookie = normalizeCookie(cookie);
     // NodeSeek 真实 Cookie 形如 session=<id>; pjwt=<JWT>，不是 koa:sess。
-    if (!getCookieValue(cleanCookie, 'session') && !getCookieValue(cleanCookie, 'pjwt')) {
-        return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie（需含 session / pjwt）' };
+    if (!getCookieValue(cleanCookie, 'session') || !getCookieValue(cleanCookie, 'pjwt')) {
+        return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie（需同时包含 session / pjwt）' };
     }
     const response = await safeFetchTimeout(NS_BASE + '/api/attendance?random=true', {
         method: 'POST',
@@ -397,7 +423,7 @@ async function checkAndAlert(userId, state, prefix, env) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 chat_id: env.ADMIN_ID,
-                text: '⚠️ <b>' + name + ' 连续 ' + state.failCount + ' 次阅读失败</b>\n建议检查 Cookie 或站点状态。',
+                text: '⚠️ <b>' + name + ' 连续 ' + state.failCount + ' 次签到失败</b>\n建议检查 Cookie 或站点状态。',
                 parse_mode: 'HTML'
             })
         }).catch(function(){});
@@ -1113,8 +1139,8 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     // NodeSeek 是独立站点，不是 Discourse：Cookie 形如 session=<id>; pjwt=<JWT>。
     if (state === 'AWAITING_NODESEEK_COOKIE') {
         const cookie = normalizeCookie(text);
-        if (!getCookieValue(cookie, 'session') && !getCookieValue(cookie, 'pjwt')) {
-            return rp("❌ Cookie 格式错误！需要包含 <code>session</code> / <code>pjwt</code>，请在 https://nodeseek.com 复制完整 Cookie。");
+        if (!getCookieValue(cookie, 'session') || !getCookieValue(cookie, 'pjwt')) {
+            return rp("❌ Cookie 格式错误！需要同时包含 <code>session</code> 与 <code>pjwt</code>，请在 https://nodeseek.com 复制完整 Cookie。");
         }
         const identity = nodeseekIdentity(cookie);
         let accounts = await getAccounts(userId, env);
@@ -1217,10 +1243,25 @@ async function processUpdateCookie(chatId, userId, text, env) {
     const accounts = await getAccounts(userId, env);
     if (!accounts[index]) return rp("❌ 账号不存在");
     
-    accounts[index].cookie = normalizeCookie(text);
-    const domain = accounts[index].domain;
-    const isDiscourse = isForumAccount(accounts[index]);
-    if (isGladosAccount(accounts[index])) accounts[index].domain = GLADOS_DOMAIN;
+    const newCookie = normalizeCookie(text);
+    const account = accounts[index];
+    const domain = account.domain;
+    const isDiscourse = isForumAccount(account);
+    if (isNodeLocAccount(account) && !getCookieValue(newCookie, '_forum_session')) {
+        return rp("❌ NodeLoc Cookie 格式错误：需要包含 <code>_forum_session</code>。");
+    }
+    if (isNodeSeekAccount(account) && (!getCookieValue(newCookie, 'session') || !getCookieValue(newCookie, 'pjwt'))) {
+        return rp("❌ NodeSeek Cookie 格式错误：需要同时包含 <code>session</code> 与 <code>pjwt</code>。");
+    }
+    if (isGladosAccount(account) && !getCookieValue(newCookie, 'koa:sess')) {
+        return rp("❌ GLaDOS Cookie 格式错误：需要包含 <code>koa:sess</code>。");
+    }
+    account.cookie = newCookie;
+    if (isNodeSeekAccount(account)) {
+        account.email = nodeseekIdentity(newCookie);
+        account.username = account.email;
+    }
+    if (isGladosAccount(account)) account.domain = GLADOS_DOMAIN;
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     if (isDiscourse) {
         await clearDiscourseState(userId, domain, env);
@@ -1430,7 +1471,7 @@ async function handleScheduled(env) {
                 const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
                 const result = response.data;
                 acc.domain = GLADOS_DOMAIN;
-                acc.cronSuccess = Boolean(result && (result.code === 0 || result.message));
+                acc.cronSuccess = gladosCheckinSucceeded(result);
                 acc.cronMsg = result ? (result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
                 resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} GLaDOS ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronMsg}`);
                 await new Promise(function(resolve) { setTimeout(resolve, 600); });
