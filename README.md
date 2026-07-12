@@ -5,7 +5,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 ## 能干吗
 
 - **GLaDOS 签到** — 多账号每天自动签到；所有 GLaDOS 域名统一为一个账户入口，自动回退可用域名。
-- **NodeLoc / NodeSeek 签到** — 与 GLaDOS 使用同一签到时间；支持逐账号手动签到和定时签到，并显示每个账号的详细结果原因。
+- **NodeLoc / NodeSeek 签到** — 与 GLaDOS 使用同一签到时间；支持逐账号手动签到和定时签到，并显示每个账号的详细结果原因。NodeSeek 若被 Cloudflare Managed Challenge 拦截，Worker 无法代替浏览器执行验证，需要站点放行 Worker 出口或改用可访问该 API 的中转服务。
 - **Cookie 自动识别** — NodeSeek 从 `pjwt` 自动读取用户名；GLaDOS 从 `koa:sess` 查询账户邮箱，并按邮箱更新去重。
 - **论坛浏览功能** — 已移除 NodeLoc / NodeSeek 的自动浏览帖子逻辑，只保留稳定的自动签到。
 - **健康监控** — 菜单显示各站状态；Cookie 失效自动标红，连续失败主动推送告警。

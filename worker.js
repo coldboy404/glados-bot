@@ -101,8 +101,10 @@ function explainForumFailure(site, result) {
     if (/bad csrf|csrf|无效的请求|invalid request/.test(lower)) {
         return '请求校验失败（CSRF 或请求参数无效，请重新复制 Cookie 后重试）';
     }
-    if (/<!doctype html|<html|just a moment|cloudflare/i.test(raw)) {
-        return `${site} 被 Cloudflare 拦截，请更新 cf_clearance 后重试`;
+    if (/<!doctype html|<html|just a moment|security verification|cloudflare/i.test(raw)) {
+        return site === 'NodeSeek'
+            ? '被 Cloudflare Managed Challenge 拦截，Worker 无法执行浏览器验证；这不是普通 Cookie 失效'
+            : `${site} 被 Cloudflare 拦截，请稍后重试或更新 cf_clearance`;
     }
     if (/timeout|超时/.test(lower)) return '请求超时，请稍后重试';
     if (/already|已签|重复|今天已|今日已/.test(lower)) return '今日已签到';
@@ -169,14 +171,23 @@ function nodelocToday() {
 async function runNodelocCheckin(cookie) {
     const cleanCookie = normalizeCookie(cookie);
     if (!getCookieValue(cleanCookie, '_forum_session')) return { ok: false, cookieError: '缺少 _forum_session', message: 'Cookie 格式不完整' };
-    const csrfResponse = await safeFetchTimeout(NL_BASE + '/session/csrf.json', {
-        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cleanCookie, 'Accept': 'application/json', 'Referer': NL_BASE + '/' }
-    }, 10000);
-    if (!csrfResponse) return { ok: false, message: '获取 CSRF 超时' };
-    if (csrfResponse.status === 401) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
-    const csrfData = await csrfResponse.json().catch(function() { return {}; });
-    const csrf = csrfData.csrf || '';
-    if (!csrf) return { ok: false, message: '未取得 CSRF Token' };
+    // Discourse 通常把当前会话的 CSRF Token 放在 Cookie 的 _t 中。
+    // 优先使用 _t，避免 /session/csrf.json 响应下发的新 Set-Cookie 与用户原会话不匹配。
+    let csrf = '';
+    const csrfCookie = getCookieValue(cleanCookie, '_t');
+    if (csrfCookie) {
+        try { csrf = decodeURIComponent(csrfCookie); } catch (e) { csrf = csrfCookie; }
+    }
+    if (!csrf) {
+        const csrfResponse = await safeFetchTimeout(NL_BASE + '/session/csrf.json', {
+            headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cleanCookie, 'Accept': 'application/json', 'Referer': NL_BASE + '/' }
+        }, 10000);
+        if (!csrfResponse) return { ok: false, message: '获取 CSRF 超时' };
+        if (csrfResponse.status === 401) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
+        const csrfData = await csrfResponse.json().catch(function() { return {}; });
+        csrf = csrfData.csrf || '';
+    }
+    if (!csrf) return { ok: false, message: 'Cookie 中没有 _t，且未取得 CSRF Token' };
 
     const response = await safeFetchTimeout(NL_BASE + '/checkin.json', {
         method: 'POST',
@@ -225,16 +236,19 @@ async function runNodeseekCheckin(cookie) {
         }
     }, 12000);
     if (!response) return { ok: false, message: '签到请求超时' };
-    if (response.status === 401 || response.status === 403) return { ok: false, cookieError: '未登录或 Cloudflare 验证', message: 'Cookie 已失效或需刷新 cf_clearance' };
     const raw = await response.text();
     const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
+    const isCloudflareChallenge = response.headers.get('cf-mitigated') === 'challenge' || /<!doctype html|<html|just a moment|security verification/i.test(raw);
     const message = data.message || data.msg || raw.slice(0, 120) || ('HTTP ' + response.status);
     const messageText = String(message).toLowerCase();
     const already = /已完成|已签到|重复|already|today/i.test(messageText);
+    const highRisk = /high risk action|risk action/i.test(messageText);
     const successText = /成功|完成|签到|success|check.?in|observation logged|tomorrow/i.test(messageText);
     const failedText = /失败|错误|禁止|无权限|登录|过期|fail|error|unauthorized|forbidden/i.test(messageText);
-    const ok = response.ok && (data.success === true || already || (!failedText && (successText || data.gain !== undefined || data.current !== undefined)));
-    return { ok, already, points: data.gain || '', current: data.current || '', message, cookieError: '' };
+    const cookieError = response.status === 401 ? '未登录' : '';
+    const ok = response.ok && !isCloudflareChallenge && !highRisk && (data.success === true || already || (!failedText && (successText || data.gain !== undefined || data.current !== undefined)));
+    const reason = isCloudflareChallenge ? 'NodeSeek Cloudflare 挑战，Worker 无法执行 JavaScript 验证' : highRisk ? 'NodeSeek 判定为高风险请求，通常需要浏览器环境' : message;
+    return { ok, already, points: data.gain || '', current: data.current || '', message: reason, cookieError };
 }
 
 async function runForumCheckin(acc) {
