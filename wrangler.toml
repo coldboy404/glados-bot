@@ -2,6 +2,8 @@ name = "glados-bot"
 main = "worker.js"
 compatibility_date = "2026-04-30"
 workers_dev = true
+# Cloudflare GitHub 自动部署时保留 Dashboard 中已配置的 BOT_TOKEN / ADMIN_ID 等变量
+keep_vars = true
 
 [[kv_namespaces]]
 binding = "GLADOS_DB"

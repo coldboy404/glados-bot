@@ -34,9 +34,9 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 | `BOT_TOKEN` | Secret | Telegram BotFather 的机器人 Token |
 | `ADMIN_ID` | Secret 或 Text | 你的 Telegram 用户 ID |
 
-这两个变量已经从 `wrangler.toml` 中移除，不会再被仓库更新中的占位值覆盖。以后 GitHub 有新提交时，Cloudflare 自动部署代码，但会保留 Dashboard 中已保存的变量。
+`wrangler.toml` 已配置 `keep_vars = true`。Cloudflare GitHub 自动部署时会保留 Dashboard 中已保存的变量，不会因为仓库配置里没有写入 Token/ID 而将它们清空。
 
-如果 Cloudflare 的构建设置里手动填写了 `npx wrangler deploy`，保持即可；不要把 `BOT_TOKEN` 或 `ADMIN_ID` 写回 `wrangler.toml`。
+如果 Cloudflare 的构建设置里手动填写了 `npx wrangler deploy`，保持即可。不要把真实的 `BOT_TOKEN` 写进 GitHub；只在 Cloudflare Dashboard 的 Variables and Secrets 中保存一次。
 
 ## 绑定账号
 
