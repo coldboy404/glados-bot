@@ -1,4 +1,5 @@
-name = "glados-bot"
+# wrangler.toml
+name = 'glados-discourse-bot'
 main = "worker.js"
 compatibility_date = "2026-04-30"
 workers_dev = true
