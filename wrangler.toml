@@ -9,6 +9,6 @@ keep_vars = true
 binding = "GLADOS_DB"
 
 [triggers]
-# 每小时执行签到；每分钟仅检查 BOT_TOKEN 是否变化并自动重设既有 webhook。
-crons = ["0 * * * *", "* * * * *"]
+# 每小时执行签到；每五分钟仅在 BOT_TOKEN 变化时自动重设 webhook。
+crons = ["0 * * * *", "*/5 * * * *"]
 

@@ -92,7 +92,7 @@ async function getHealthSummary(userId, env) {
 
 
 // Cloudflare 不会在变量保存时执行 Worker 代码。每分钟的轻量 Cron 会检测
-// BOT_TOKEN 是否变化；新 Token 继承同一 Bot 的既有 webhook 地址后，自动重新注册。
+// BOT_TOKEN 是否变化，并使用 Dashboard 保存的稳定 webhook 地址自动重新注册。
 async function telegramApi(env, method, body) {
     if (!env.BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN 未配置' };
     try {
@@ -121,12 +121,11 @@ async function reconcileTelegramWebhook(env) {
     const savedFingerprint = await env.GLADOS_DB.get('SYSTEM_BOT_TOKEN_FINGERPRINT');
     if (savedFingerprint === fingerprint) return;
 
-    // getWebhookInfo 使用新 Token 读取同一个 Bot 已保存的地址，避免把 Workers
-    // 域名硬编码到代码或要求用户访问 /setup。
-    const webhookInfo = await telegramApi(env, 'getWebhookInfo');
-    const webhookUrl = webhookInfo && webhookInfo.result && webhookInfo.result.url;
-    if (!webhookInfo.ok || !/^https:\/\/.+\/webhook(?:\?.*)?$/.test(String(webhookUrl || ''))) {
-        console.log('Webhook 自动恢复跳过：新 Token 没有可继承的 HTTPS webhook 地址');
+    // 新 Token 无法读取旧 Token 保存的 getWebhookInfo，因此 webhook URL 必须作为
+    // 非敏感 Dashboard Text 变量 WEBHOOK_URL 维持不变。
+    const webhookUrl = String(env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
+    if (!/^https:\/\/.+\/webhook(?:\?.*)?$/.test(webhookUrl)) {
+        console.log('Webhook 自动恢复跳过：WEBHOOK_URL 未配置或格式无效');
         return;
     }
 
