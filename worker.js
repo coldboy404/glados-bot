@@ -2,7 +2,13 @@
 
 const VIP_MAP = { 0: "Free", 10: "Free", 11: "Edu", 21: "Basic", 31: "Pro", 41: "Team", 51: "Enterprise" };
 const LIMIT_MAP = { 0: 10, 10: 10, 11: 100, 21: 200, 31: 500, 41: 2000, 51: 5000 };
-const DEFAULT_SITES = ["glados.network", "glados.cloud", "railgun.info", "glados.rocks"];
+
+// GLaDOS 的几个旧域名共用同一套账号系统。对用户只保留一个入口；请求失败时再按旧域名回退。
+const GLADOS_DOMAIN = 'glados.network';
+const GLADOS_DOMAINS = [GLADOS_DOMAIN, 'glados.cloud', 'railgun.info', 'glados.rocks', 'glados.vip', 'glados.one', 'glados.space'];
+const DEFAULT_SITES = [GLADOS_DOMAIN];
+const NL_DOMAIN = 'nodeloc.com';
+const NS_DOMAIN = 'nodeseek.com';
 
 const HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -21,9 +27,9 @@ async function safeFetchTimeout(url, opts, ms = 12000) {
     } catch(e) { return null; }
 }
 
-// ================= NodeLoc 自动阅读模块（v3 - 静默版） =================
+// ================= NodeLoc 阅读/签到 + NodeSeek 签到 =================
 const NL_BASE = 'https://www.nodeloc.com';
-const NS_BASE = 'https://nodeseek.cc';
+const NS_BASE = 'https://www.nodeseek.com';
 const NL_UAS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -55,6 +61,119 @@ async function nlGetState(userId, env, prefix = 'NL') {
 
 async function nlSaveState(userId, state, env, prefix = 'NL') {
     await env.GLADOS_DB.put(`${prefix}_STATE_${userId}`, JSON.stringify(state));
+}
+
+function isNodeLocAccount(acc) { return acc && acc.domain === NL_DOMAIN; }
+function isNodeSeekAccount(acc) { return acc && acc.domain === NS_DOMAIN; }
+function isForumAccount(acc) { return isNodeLocAccount(acc) || isNodeSeekAccount(acc); }
+function isGladosAccount(acc) { return acc && !isForumAccount(acc); }
+
+function normalizeCookie(raw) {
+    return String(raw || '')
+        .replace(/^Cookie:\s*/i, '')
+        .replace(/[\r\n]+/g, '; ')
+        .split(';')
+        .map(function(part) { return part.trim(); })
+        .filter(function(part) { return /^[^=;\s]+=[\s\S]*$/.test(part); })
+        .join('; ');
+}
+
+function getCookieValue(cookie, name) {
+    const match = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '=([^;]*)'));
+    return match ? match[1] : '';
+}
+
+function gladosRequestDomains(acc) {
+    const preferred = (acc && GLADOS_DOMAINS.includes(acc.domain)) ? acc.domain : GLADOS_DOMAIN;
+    return [preferred].concat(GLADOS_DOMAINS.filter(function(domain) { return domain !== preferred; }));
+}
+
+async function gladosFetchJson(acc, path, options) {
+    const opts = options || {};
+    for (const domain of gladosRequestDomains(acc)) {
+        const result = await safeFetchJson('https://' + domain + path, {
+            ...opts,
+            headers: { ...HEADERS, ...(opts.headers || {}), 'cookie': acc.cookie, 'origin': 'https://' + domain }
+        });
+        if (result) return { data: result, domain };
+    }
+    return { data: null, domain: acc.domain || GLADOS_DOMAIN };
+}
+
+function nodelocToday() {
+    const beijingNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+    return beijingNow.toISOString().slice(0, 10);
+}
+
+function nodelocNonce() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, function(byte) { return byte.toString(36); }).join('').slice(0, 26);
+}
+
+async function runNodelocCheckin(cookie) {
+    const cleanCookie = normalizeCookie(cookie);
+    if (!getCookieValue(cleanCookie, '_forum_session')) return { ok: false, cookieError: '缺少 _forum_session', message: 'Cookie 格式不完整' };
+    const csrfResponse = await safeFetchTimeout(NL_BASE + '/session/csrf.json', {
+        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cleanCookie, 'Accept': 'application/json', 'Referer': NL_BASE + '/' }
+    }, 10000);
+    if (!csrfResponse) return { ok: false, message: '获取 CSRF 超时' };
+    if (csrfResponse.status === 401 || csrfResponse.status === 403) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
+    const csrfData = await csrfResponse.json().catch(function() { return {}; });
+    const csrf = csrfData.csrf || '';
+    if (!csrf) return { ok: false, message: '未取得 CSRF Token' };
+
+    const nonce = nodelocNonce();
+    const response = await safeFetchTimeout(NL_BASE + '/checkin', {
+        method: 'POST',
+        headers: {
+            'User-Agent': HEADERS['User-Agent'],
+            'Cookie': cleanCookie,
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': NL_BASE,
+            'Referer': NL_BASE + '/',
+            'X-Discourse-Checkin': 'true',
+            'X-Checkin-Nonce': nonce,
+            'X-CSRF-Token': csrf,
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({ nonce: nonce, timestamp: String(Date.now()) }).toString()
+    }, 12000);
+    if (!response) return { ok: false, message: '签到请求超时' };
+    if (response.status === 401 || response.status === 403) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
+    const raw = await response.text();
+    const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
+    const message = data.message || data.msg || raw.slice(0, 100) || ('HTTP ' + response.status);
+    const already = /already|已签|重复|today/i.test(message);
+    return { ok: response.ok && (data.success !== false || already), already, points: data.points || data.gain || '', message, cookieError: '' };
+}
+
+async function runNodeseekCheckin(cookie) {
+    const cleanCookie = normalizeCookie(cookie);
+    if (!cleanCookie || !/(?:koa:sess|session|token)=/i.test(cleanCookie)) return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie' };
+    const response = await safeFetchTimeout(NS_BASE + '/api/attendance?random=true', {
+        method: 'POST',
+        headers: {
+            'User-Agent': HEADERS['User-Agent'],
+            'Cookie': cleanCookie,
+            'Accept': 'application/json, text/plain, */*',
+            'Origin': NS_BASE,
+            'Referer': NS_BASE + '/board',
+            'Content-Length': '0'
+        }
+    }, 12000);
+    if (!response) return { ok: false, message: '签到请求超时' };
+    if (response.status === 401 || response.status === 403) return { ok: false, cookieError: '未登录或 Cloudflare 验证', message: 'Cookie 已失效或需刷新 cf_clearance' };
+    const raw = await response.text();
+    const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
+    const message = data.message || data.msg || raw.slice(0, 100) || ('HTTP ' + response.status);
+    const already = /已完成|已签到|重复|already/i.test(message);
+    return { ok: response.ok && (data.success === true || already), already, points: data.gain || '', current: data.current || '', message, cookieError: '' };
+}
+
+async function runForumCheckin(acc) {
+    return isNodeLocAccount(acc) ? runNodelocCheckin(acc.cookie) : runNodeseekCheckin(acc.cookie);
 }
 
 // 刷新话题队列
@@ -203,7 +322,7 @@ async function getHealthSummary(userId, env) {
     const lines = [];
     // GLaDOS
     const accts = await getAccounts(userId, env);
-    const glados = accts.filter(function(a){ return a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc'; });
+    const glados = accts.filter(function(a){ return a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.com'; });
     if (glados.length > 0) {
         const ok = glados.filter(function(a){ return a.cronSuccess !== false; }).length;
         const bad = glados.filter(function(a){ return a.cronSuccess === false; }).length;
@@ -218,7 +337,7 @@ async function getHealthSummary(userId, env) {
     // Discourse 阅读站
     const sites = [
         { domain: 'nodeloc.com', pfx: 'NL', name: 'NodeLoc' },
-        { domain: 'nodeseek.cc', pfx: 'NS', name: 'NodeSeek' },
+        { domain: 'nodeseek.com', pfx: 'NS', name: 'NodeSeek' },
     ];
     for (const site of sites) {
         const siteAccts = accts.filter(function(a){ return a.domain === site.domain; });
@@ -233,7 +352,8 @@ async function getHealthSummary(userId, env) {
         } else if ((s.failCount || 0) >= 5) {
             lines.push('🟡 ' + label + ' 连续 ' + s.failCount + ' 次失败');
         } else {
-            lines.push('🟢 ' + label + ' 正常 | 已读 ' + (s.readTotal || 0) + ' 帖');
+            const checked = s.lastCheckinDate === nodelocToday() ? '今日已签到' : '等待签到';
+            lines.push('🟢 ' + label + ' 正常 | ' + checked);
         }
     }
     return lines.join('\n');
@@ -677,6 +797,7 @@ async function handleCallback(callbackQuery, env, origin) {
     else if (data === 'clear_all_yes') {
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify([]));
         await env.GLADOS_DB.delete('NL_STATE_' + userId);
+        await env.GLADOS_DB.delete('NS_STATE_' + userId);
         await tgEdit(chatId, messageId, "✅ <b>已成功清空所有账号。</b>", { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] }, env);
     }
     else if (data.startsWith('list_')) {
@@ -694,11 +815,11 @@ async function handleCallback(callbackQuery, env, origin) {
         if (!acc) return rp("❌ 找不到该账号");
 
         if (action === 'manage') {
-            const isDiscourse = acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc';
+            const isDiscourse = isForumAccount(acc);
             const kb = {
                 inline_keyboard: [
                     [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` },
-                     { text: isDiscourse ? "📖 立即单独阅读" : "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
+                     { text: "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
                     [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }, { text: "❌ 删除此账户", callback_data: `del_acc_${index}` }],
                     [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
                 ]
@@ -723,12 +844,10 @@ async function handleCallback(callbackQuery, env, origin) {
             const st = await env.GLADOS_DB.get('NL_STATE_' + userId, 'json') || {};
             const today = new Date().toISOString().slice(0,10);
             const isToday = st.date === today;
-            let msg = `🌐 <b>NodeLoc 自动阅读</b>\n\n`;
+            let msg = `🌐 <b>NodeLoc 自动签到</b>\n\n`;
             msg += `👤 账号: ${maskEmail(acc.email || acc.username || '?', pref.showEmail)}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📖 今日已读: ${isToday ? (st.readsToday || 0) : 0} 帖\n`;
-            msg += `⏱ 今日阅读: ${isToday ? Math.round((st.todayReadTime || 0) / 60000) : 0} 分钟\n`;
-            msg += `📚 累计已读: ${st.readTotal || 0} 帖\n`;
+            msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
             if (st.cookieError) {
                 msg += `⚠️ Cookie 异常: ${st.cookieError}\n`;
@@ -743,17 +862,15 @@ async function handleCallback(callbackQuery, env, origin) {
             }
             return rp(msg);
         }
-        if (acc.domain === 'nodeseek.cc') {
+        if (acc.domain === 'nodeseek.com') {
             const pref = await getPref(userId, env);
             const st = await env.GLADOS_DB.get('NS_STATE_' + userId, 'json') || {};
             const today = new Date().toISOString().slice(0,10);
             const isToday = st.date === today;
-            let msg = `🔹 <b>NodeSeek 自动阅读</b>\n\n`;
+            let msg = `🔹 <b>NodeSeek 自动签到</b>\n\n`;
             msg += `👤 账号: ${acc.username || '?'}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📖 今日已读: ${isToday ? (st.readsToday || 0) : 0} 帖\n`;
-            msg += `⏱ 今日阅读: ${isToday ? Math.round((st.todayReadTime || 0) / 60000) : 0} 分钟\n`;
-            msg += `📚 累计已读: ${st.readTotal || 0} 帖\n`;
+            msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
             if (st.cookieError) {
                 msg += `⚠️ Cookie 异常: ${st.cookieError}\n`;
@@ -781,6 +898,28 @@ async function handleCallback(callbackQuery, env, origin) {
         const acc = accounts[index];
         if (!acc) return rp("❌ 账号不存在");
         
+        if (isForumAccount(acc)) {
+            await rp(`⏳ 正在执行 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'} 签到，请稍候...`);
+            const result = await runForumCheckin(acc);
+            const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
+            const state = await nlGetState(userId, env, prefix);
+            if (result.ok) {
+                state.cookieError = '';
+                state.failCount = 0;
+                state.failAlerted = false;
+                state.lastCheckinDate = nodelocToday();
+                state.lastCheckinMessage = result.message;
+            } else {
+                state.cookieError = result.cookieError || '';
+                state.failCount = (state.failCount || 0) + 1;
+                state._lastError = result.message;
+            }
+            await nlSaveState(userId, state, env, prefix);
+            await checkAndAlert(userId, state, prefix, env);
+            const reward = result.points ? `\n🎁 本次: +${result.points}` : '';
+            const balance = result.current ? `\n🍗 当前: ${result.current}` : '';
+            return rp(`${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}\n🌐 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'}\n📝 ${result.message || '未知响应'}${reward}${balance}`);
+        }
         if (acc.domain === 'nodeloc.com') {
             var mid = callbackQuery.message.message_id;
             var mt = function(s) { fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
@@ -825,12 +964,12 @@ async function handleCallback(callbackQuery, env, origin) {
             }
             return;
         }
-        if (acc.domain === 'nodeseek.cc') {
+        if (acc.domain === 'nodeseek.com') {
             var mid = callbackQuery.message.message_id;
             var mt = function(s) { fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
             mt('📖 NS 手动阅读\n───────');
             try {
-                var r1 = await Promise.race([fetch('https://nodeseek.cc/latest.json?no_definitions=true',{headers:{'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json'}}),new Promise(function(r){setTimeout(r,15000)})]);
+                var r1 = await Promise.race([fetch('https://nodeseek.com/latest.json?no_definitions=true',{headers:{'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json'}}),new Promise(function(r){setTimeout(r,15000)})]);
                 if(!r1){ mt('❌ 话题列表超时'); return; }
                 var d1 = await r1.json().catch(function(){return{}});
                 var allTopics = (d1.topic_list?.topics||[]).filter(function(t){return !t.pinned&&t.id});
@@ -849,7 +988,7 @@ async function handleCallback(callbackQuery, env, origin) {
                         var rMs=3000+Math.floor(Math.random()*4000);
                         mt('⏳ #'+t.id+' 等待 '+Math.round(rMs/1000)+'s... ('+ok+'/5) | '+stage);
                         await new Promise(function(r){setTimeout(r,rMs)});
-                        fetch('https://nodeseek.cc/t/'+t.id+'/timings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Cookie':acc.cookie,'User-Agent':HEADERS['User-Agent']},body:JSON.stringify({timings:[{topic_id:t.id,msecs:rMs}]})}).catch(function(){});
+                        fetch('https://nodeseek.com/t/'+t.id+'/timings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Cookie':acc.cookie,'User-Agent':HEADERS['User-Agent']},body:JSON.stringify({timings:[{topic_id:t.id,msecs:rMs}]})}).catch(function(){});
                         ok++;totalMs+=rMs;
                         mt('✅ #'+t.id+' 完成 ('+ok+'/5) | ⏱ '+Math.round(rMs/1000)+'s | '+stage);
                     } catch(e){ mt('❌ #'+t.id+' 异常: '+(e.message||e)); skipped++; }
@@ -882,7 +1021,7 @@ async function handleCallback(callbackQuery, env, origin) {
         accounts.splice(index, 1);
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         if (acc.domain === 'nodeloc.com') await env.GLADOS_DB.delete('NL_STATE_' + userId);
-        if (acc.domain === 'nodeseek.cc') await env.GLADOS_DB.delete('NS_STATE_' + userId);
+        if (acc.domain === 'nodeseek.com') await env.GLADOS_DB.delete('NS_STATE_' + userId);
         const pref = await getPref(userId, env);
         await tgEdit(chatId, messageId, `✅ 已成功删除账号：<code>${maskEmail(deletedEmail, pref.showEmail)}</code>`, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] }, env);
     }
@@ -899,8 +1038,8 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'add_nodeseek') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODESEEK_COOKIE', { expirationTtl: 300 });
-        await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeseek.cc', { expirationTtl: 300 });
-        await rp("🔹 <b>绑定 NodeSeek 账号</b>\n\n打开 https://nodeseek.cc → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
+        await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeseek.com', { expirationTtl: 300 });
+        await rp("🔹 <b>绑定 NodeSeek 账号</b>\n\n打开 https://nodeseek.com → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
     }
     else if (data === 'bind_ns') {
     }
@@ -961,7 +1100,7 @@ async function fetchDiscourseUser(cookie, baseUrl) {
 // 诊断 NodeSeek 连通性
 async function diagnoseNodeseek(userId, env) {
     const accounts = await getAccounts(userId, env);
-    const nsAcc = accounts.find(a => a.domain === 'nodeseek.cc');
+    const nsAcc = accounts.find(a => a.domain === 'nodeseek.com');
     if (!nsAcc) return '没有 NodeSeek 账号';
     const rows = ['🔍 NodeSeek 诊断结果', '━━━━━━━━━━━'];
     async function t(label, url, extra) {
@@ -977,13 +1116,13 @@ async function diagnoseNodeseek(userId, env) {
             return null;
         }
     }
-    const r1 = await t('/latest.json', 'https://nodeseek.cc/latest.json?no_definitions=true', {
+    const r1 = await t('/latest.json', 'https://nodeseek.com/latest.json?no_definitions=true', {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json' }
     });
     if (r1) {
         try { const d = await r1.json(); rows.push(`   topics=${d.topic_list?.topics?.length || 0}`); } catch(e) { rows.push(`   json parse ❌`); }
     }
-    const r2 = await t('/t/5', 'https://nodeseek.cc/t/5', {
+    const r2 = await t('/t/5', 'https://nodeseek.com/t/5', {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie }
     });
     if (r2) {
@@ -991,7 +1130,7 @@ async function diagnoseNodeseek(userId, env) {
         const h = await r2.text();
         rows.push(`   csrf=${!!h.match(/csrf-token" content="([^"]+)"/)} len=${h.length}`);
     }
-    const r3 = await t('/session/current.json', 'https://nodeseek.cc/session/current.json', {
+    const r3 = await t('/session/current.json', 'https://nodeseek.com/session/current.json', {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json' }
     });
     if (r3) {
@@ -1013,8 +1152,8 @@ async function processAddAccountInfo(chatId, userId, text, env) {
 
     // NodeLoc: 直接发 cookie，bot 自动提取用户名
     if (state === 'AWAITING_NODELOC_COOKIE') {
-        let cookie = text.trim();
-        if (!/_forum_session=/.test(cookie)) {
+        const cookie = normalizeCookie(text);
+        if (!getCookieValue(cookie, '_forum_session')) {
             return rp("❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。");
         }
         const userInfo = await fetchDiscourseUser(cookie, NL_BASE);
@@ -1035,54 +1174,56 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         return;
     }
 
-    // NodeSeek: 直接发 cookie，bot 自动提取用户名
+    // NodeSeek 是独立站点，不是 Discourse：保留完整 Cookie；koa:sess 中有 userId 时将其作为账号标识。
     if (state === 'AWAITING_NODESEEK_COOKIE') {
-        let cookie = text.trim();
-        if (!/_forum_session=/.test(cookie)) {
-            return rp("❌ Cookie 格式错误！需要包含 <code>_forum_session</code>。");
-        }
-        const userInfo = await fetchDiscourseUser(cookie, NS_BASE);
-        if (!userInfo) return rp("❌ 无法验证 Cookie，请确认已登录 NodeSeek 后重新抓取。");
+        const cookie = normalizeCookie(text);
+        const session = getCookieValue(cookie, 'koa:sess');
+        if (!session) return rp("❌ Cookie 格式错误！需要包含 <code>koa:sess</code>，请在 https://nodeseek.com 复制完整 Cookie。");
+        let identity = '';
+        try {
+            const decoded = JSON.parse(atob(session.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')));
+            if (decoded && decoded.userId) identity = 'NodeSeek #' + decoded.userId;
+        } catch(e) {}
+        if (!identity) identity = 'NodeSeek 账号';
         let accounts = await getAccounts(userId, env);
-        const sessionMatch = cookie.match(/_forum_session=([^;]+)/);
-        const sessionVal = sessionMatch ? sessionMatch[1] : null;
-        const exists = accounts.some(a => a.domain === 'nodeseek.cc' && a.cookie && a.cookie.includes(sessionVal));
-        if (exists) return rp(`ℹ️ 该账号已绑定（<code>${userInfo.email || userInfo.username}</code>），无需重复操作。`);
-        accounts.push({ email: userInfo.email, username: userInfo.username, domain: 'nodeseek.cc', cookie: cookie });
+        const exists = accounts.some(function(a) { return isNodeSeekAccount(a) && getCookieValue(a.cookie, 'koa:sess') === session; });
+        if (exists) return rp(`ℹ️ 该账号已绑定（<code>${identity}</code>），无需重复操作。`);
+        accounts.push({ email: identity, username: identity, domain: NS_DOMAIN, cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         await saveUserIdForCron(userId, env);
-        await clearDiscourseState(userId, 'nodeseek.cc', env);
+        await clearDiscourseState(userId, NS_DOMAIN, env);
         const total = accounts.length;
-        const nsTotal = accounts.filter(a => a.domain === 'nodeseek.cc').length;
-        await rp(`✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${userInfo.email || userInfo.username}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 自动阅读将在下次整点 cron 开始。`);
+        const nsTotal = accounts.filter(isNodeSeekAccount).length;
+        await rp(`✅ <b>NodeSeek 绑定成功！</b>\n\n👤 账号: <code>${identity}</code>\n🔹 NodeSeek 账号: ${nsTotal} 个\n📦 当前总账号数: ${total} 个\n\n⏰ 将按「签到设置」的时间自动签到。`);
         return;
     }
 
-    // GLaDOS 裸 cookie：自动提取邮箱
-    if (text.indexOf(':') === -1 && text.indexOf('=') > -1 && /expires=|connect.sid|_forum_session/.test(text) === false) {
-        const gladosDomains = ['glados.network', 'railgun.info', 'glados.vip', 'glados.one', 'glados.space'];
+    // GLaDOS 裸 Cookie：多个官方域名账户互通，统一写入 glados.network；自动查询邮箱并按邮箱覆盖旧 Cookie。
+    if (text.indexOf('=') > -1 && !/expires=|connect\.sid|_forum_session|koa:sess/.test(text)) {
+        const cookie = normalizeCookie(text);
         let found = null;
-        for (const d of gladosDomains) {
-            try {
-                const res = await fetch(`https://${d}/api/user/info`, {
-                    headers: { ...HEADERS, 'Cookie': text.trim() }
-                });
-                const data = await res.json();
-                if (data && data.code === 0 && data.data && data.data.userInfo && data.data.userInfo.email) {
-                    found = { email: data.data.userInfo.email, domain: d };
-                    break;
-                }
-            } catch(e) {}
+        for (const domainCandidate of GLADOS_DOMAINS) {
+            const data = await safeFetchJson(`https://${domainCandidate}/api/user/info`, { headers: { ...HEADERS, 'Cookie': cookie, 'Origin': `https://${domainCandidate}` } });
+            const email = data && data.code === 0 && data.data && data.data.userInfo && data.data.userInfo.email;
+            if (email) {
+                found = { email: email, sourceDomain: domainCandidate };
+                break;
+            }
         }
         if (found) {
             let accounts = await getAccounts(userId, env);
-            accounts.push({ domain: found.domain, email: found.email, cookie: text.trim() });
+            const emailKey = found.email.trim().toLowerCase();
+            const existingIndex = accounts.findIndex(function(account) { return isGladosAccount(account) && String(account.email || '').trim().toLowerCase() === emailKey; });
+            const account = { domain: GLADOS_DOMAIN, email: found.email, cookie: cookie };
+            const updated = existingIndex >= 0;
+            if (updated) accounts[existingIndex] = { ...accounts[existingIndex], ...account };
+            else accounts.push(account);
             await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
             await saveUserIdForCron(userId, env);
-            const total = accounts.filter(a => a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc').length;
-            return rp(`✅ <b>GLaDOS 绑定成功！</b>\n\n👤 账号: <code>${found.email}</code>\n🔗 域名: <code>${found.domain}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n💡 如需手动绑定，使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式。`);
+            const total = accounts.filter(isGladosAccount).length;
+            return rp(`✅ <b>GLaDOS ${updated ? 'Cookie 已更新' : '绑定成功'}！</b>\n\n👤 账号: <code>${found.email}</code>\n🌐 统一站点: <code>${GLADOS_DOMAIN}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n<i>Cookie 已从 ${found.sourceDomain} 验证；各 GLaDOS 域名共用同一账户。</i>`);
         }
-        return rp("❌ 无法验证 Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 或 <code>邮箱,cookie,域名</code> 格式手动绑定。");
+        return rp("❌ 无法验证 GLaDOS Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 格式手动绑定。");
     }
 
     const lines = text.split('\n');
@@ -1105,10 +1246,12 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         }
     }
 
-    accounts = Array.from(accMap.values());
+    accounts = Array.from(accMap.values()).map(function(account) {
+        return isGladosAccount(account) ? { ...account, domain: GLADOS_DOMAIN, cookie: normalizeCookie(account.cookie) } : { ...account, cookie: normalizeCookie(account.cookie) };
+    });
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     await saveUserIdForCron(userId, env);
-    if (domain === 'nodeloc.com' || domain === 'nodeseek.cc') {
+    if (domain === 'nodeloc.com' || domain === 'nodeseek.com') {
         await clearDiscourseState(userId, domain, env);
     }
 
@@ -1138,13 +1281,14 @@ async function processUpdateCookie(chatId, userId, text, env) {
     const accounts = await getAccounts(userId, env);
     if (!accounts[index]) return rp("❌ 账号不存在");
     
-    accounts[index].cookie = text.trim();
-    await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
+    accounts[index].cookie = normalizeCookie(text);
     const domain = accounts[index].domain;
-    const isDiscourse = domain === 'nodeloc.com' || domain === 'nodeseek.cc';
+    const isDiscourse = isForumAccount(accounts[index]);
+    if (isGladosAccount(accounts[index])) accounts[index].domain = GLADOS_DOMAIN;
+    await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     if (isDiscourse) {
         await clearDiscourseState(userId, domain, env);
-        await rp("✅ Cookie 更新成功！请使用手动阅读测试。", { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
+        await rp("✅ Cookie 更新成功！可使用「立即单独签到」验证。", { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
         return;
     }
     
@@ -1209,37 +1353,34 @@ async function executeTask(task, env, origin) {
         const acc = accounts[i];
         
         if (type === 'checkin' || type === 'view_all') {
-            if (acc.domain === 'nodeloc.com') {
-                if (type === 'view_all') {
-                    const s = await nlGetDailyStats(userId, env);
-                    let nlInfo = `├ 🌐 NodeLoc 自动阅读\n├ 📝 今日已读 ${s.readsToday} 帖`;
-                    if (s.totalReadTime > 0) nlInfo += `\n├ ⏱ 累计阅读 ${s.totalReadTime} 分钟`;
-                    if (s.readTotal > 0) nlInfo += `\n├ 📚 累计阅读 ${s.readTotal} 帖`;
-                    if (s.restUntil > 0) {
-                        const mins = Math.ceil((s.restUntil - Date.now()) / 60000);
-                        nlInfo += `\n├ 💤 休息中（剩余 ${mins} 分钟）`;
+            if (isForumAccount(acc)) {
+                const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
+                if (type === 'checkin') {
+                    const result = await runForumCheckin(acc);
+                    const state = await nlGetState(userId, env, prefix);
+                    if (result.ok) {
+                        state.cookieError = '';
+                        state.failCount = 0;
+                        state.failAlerted = false;
+                        state.lastCheckinDate = nodelocToday();
+                        state.lastCheckinMessage = result.message;
+                    } else {
+                        state.cookieError = result.cookieError || '';
+                        state.failCount = (state.failCount || 0) + 1;
+                        state._lastError = result.message;
                     }
-                    if (s.cookieError) {
-                        nlInfo += `\n├ ❌ ${s.cookieError}`;
-                    }
-                    msgs.push(`〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n[${i+1}/${accounts.length}] 👤 ${maskEmail(acc.email, pref.showEmail)}\n${nlInfo}`);
-                }
-                continue;
-            }
-            if (acc.domain === 'nodeseek.cc') {
-                if (type === 'view_all') {
-                    const s = await nsGetDailyStats(userId, env);
-                    let nsInfo = `├ 🔹 NodeSeek 自动阅读\n├ 📝 今日已读 ${s.readsToday} 帖`;
-                    if (s.totalReadTime > 0) nsInfo += `\n├ ⏱ 累计阅读 ${s.totalReadTime} 分钟`;
-                    if (s.readTotal > 0) nsInfo += `\n├ 📚 累计阅读 ${s.readTotal} 帖`;
-                    if (s.restUntil > 0) {
-                        const mins = Math.ceil((s.restUntil - Date.now()) / 60000);
-                        nsInfo += `\n├ 💤 休息中（剩余 ${mins} 分钟）`;
-                    }
-                    if (s.cookieError) {
-                        nsInfo += `\n├ ❌ ${s.cookieError}`;
-                    }
-                    msgs.push(`〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n[${i+1}/${accounts.length}] 👤 ${maskEmail(acc.username || acc.email, pref.showEmail)}\n${nsInfo}`);
+                    await nlSaveState(userId, state, env, prefix);
+                    await checkAndAlert(userId, state, prefix, env);
+                    const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
+                    const reward = result.points ? ` | 本次:+${result.points}` : '';
+                    const current = result.current ? ` | 剩余鸡腿:${result.current}` : '';
+                    msgs.push(`🌐 ${label} (${maskEmail(acc.email || acc.username, pref.showEmail)})\n└ ${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}：${result.message || '未知响应'}${reward}${current}`);
+                } else {
+                    const state = await nlGetState(userId, env, prefix);
+                    const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
+                    const last = state.lastCheckinDate === nodelocToday() ? (state.lastCheckinMessage || '已完成') : '今日尚未执行';
+                    const cookieState = state.cookieError ? `❌ ${state.cookieError}` : '✅ 正常';
+                    msgs.push(`🌐 ${label} (${maskEmail(acc.email || acc.username, pref.showEmail)})\n├ 📅 签到: ${last}\n└ 🍪 Cookie: ${cookieState}`);
                 }
                 continue;
             }
@@ -1248,7 +1389,7 @@ async function executeTask(task, env, origin) {
             msgs.push(formatAccountString(acc, i + 1, accounts.length, pref, data, true, false));
         } 
         else if (type === 'batch_exchange') {
-            if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc') continue;
+            if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.com') continue;
             const ptsRes = await safeFetchJson(`https://${acc.domain}/api/user/points`, { headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` }});
             let balanceNum = 0;
             if (ptsRes && ptsRes.code === 0) balanceNum = parseInt(ptsRes.points || 0);
@@ -1266,7 +1407,7 @@ async function executeTask(task, env, origin) {
             }
         }
         else if (type === 'sub_all') {
-            if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc') continue;
+            if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.com') continue;
             const link = await getSubAndHost(acc.domain, acc.cookie, true);
             if (link && !link.includes('xxxx')) {
                 msgs.push(`<b>${i+1}. ${maskEmail(acc.email, pref.showEmail)}</b>\n<code>${link}</code>\n`);
@@ -1326,41 +1467,49 @@ async function handleScheduled(env) {
 
         const accounts = await getAccounts(userId, env);
         if (isTrigger) {
-            let nlAcc = null;
-            for (let acc of accounts) {
-                if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc') { if (acc.domain === 'nodeloc.com') nlAcc = acc; continue; }
-                const reqOpts = { headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` } };
-                const result = await safeFetchJson(`https://${acc.domain}/api/user/checkin`, {
-                    ...reqOpts, method: 'POST', body: JSON.stringify({ token: acc.domain })
-                });
-                acc.cronSuccess = result && (result.code === 0 || result.message);
+            const resultRows = [];
+            for (const acc of accounts) {
+                if (isForumAccount(acc)) {
+                    const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
+                    const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
+                    const result = await runForumCheckin(acc);
+                    const state = await nlGetState(userId, env, prefix);
+                    if (result.ok) {
+                        state.cookieError = '';
+                        state.failCount = 0;
+                        state.failAlerted = false;
+                        state.lastCheckinDate = nodelocToday();
+                        state.lastCheckinMessage = result.message;
+                    } else {
+                        state.cookieError = result.cookieError || '';
+                        state.failCount = (state.failCount || 0) + 1;
+                        state._lastError = result.message;
+                    }
+                    await nlSaveState(userId, state, env, prefix);
+                    await checkAndAlert(userId, state, prefix, env);
+                    resultRows.push(`${result.ok ? '✅' : '❌'} ${label}: ${result.message || '未知响应'}`);
+                    await new Promise(function(resolve) { setTimeout(resolve, 600); });
+                    continue;
+                }
+                const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
+                const result = response.data;
+                acc.domain = GLADOS_DOMAIN;
+                acc.cronSuccess = Boolean(result && (result.code === 0 || result.message));
                 acc.cronMsg = result ? (result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
-                await new Promise(r => setTimeout(r, 600));
+                resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} GLaDOS ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronMsg}`);
+                await new Promise(function(resolve) { setTimeout(resolve, 600); });
             }
             await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
-            const gladosBad = accounts.filter(function(a){ return a.cronSuccess === false; });
+            const gladosBad = accounts.filter(function(acc) { return isGladosAccount(acc) && acc.cronSuccess === false; });
             if (gladosBad.length > 0) {
-                var names = gladosBad.map(function(a){ return a.email || a.username || '?'; }).join(', ');
+                const names = gladosBad.map(function(acc) { return acc.email || acc.username || '?'; }).join(', ');
                 fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
                     method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        chat_id: env.ADMIN_ID,
-                        text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names,
-                        parse_mode: 'HTML'
-                    })
+                    body: JSON.stringify({ chat_id: env.ADMIN_ID, text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names, parse_mode: 'HTML' })
                 }).catch(function(){});
             }
-            const gladosCount = accounts.filter(a => a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc').length;
-            let extraLine = '\n\n' + (await getHealthSummary(userId, env)).replace(/\| 已读 \d+ 帖/g, '');
-            await tgSend(userId, `⏰ <b>定时签到自动完成</b>\n已在后台成功向 ${gladosCount} 个账号发送了签到指令。${extraLine}`, env);
+            await tgSend(userId, `⏰ <b>定时签到自动完成</b>\n${resultRows.join('\n')}\n\n${await getHealthSummary(userId, env)}`, env);
         }
-        // 两个论坛并行阅读，共享 15 分钟时间窗口
-        const readPromises = [];
-        const nlAcc = accounts.find(a => a.domain === 'nodeloc.com' && a.cookie);
-        if (nlAcc) readPromises.push(runNodelocBatch(userId, nlAcc.cookie, env).catch(e => {}));
-        const nsAcc = accounts.find(a => a.domain === 'nodeseek.cc' && a.cookie);
-        if (nsAcc) readPromises.push(runNodelocBatch(userId, nsAcc.cookie, env, NS_BASE, false, 'NS').catch(e => {}));
-        await Promise.all(readPromises);
     }
 }
 
@@ -1380,77 +1529,68 @@ async function safeFetchJson(url, options) {
 async function getSubAndHost(domain, cookie, returnRaw = false) {
     try {
         let subLink = null;
-        const reqOpts = { headers: { ...HEADERS, 'cookie': cookie, 'origin': `https://${domain}` } };
-        
-        // 1. 优先尝试拦截 302 真实重定向接口 (完美应对部分隐藏站)
-        try {
-            const redirectRes = await fetch(`https://${domain}/api/listen/mihomo`, {
-                headers: reqOpts.headers,
-                redirect: 'manual' 
-            });
-            if (redirectRes.status >= 300 && redirectRes.status < 400) {
-                const loc = redirectRes.headers.get('Location');
-                if (loc && (loc.includes('update.glados-config') || loc.includes('update.'))) {
-                    subLink = loc;
+        let activeDomain = domain;
+        const candidateDomains = GLADOS_DOMAINS.includes(domain) ? [domain].concat(GLADOS_DOMAINS.filter(function(d) { return d !== domain; })) : [domain];
+        for (const candidate of candidateDomains) {
+            activeDomain = candidate;
+            const reqOpts = { headers: { ...HEADERS, 'cookie': cookie, 'origin': `https://${candidate}` } };
+            // 1. 优先尝试拦截 302 真实重定向接口
+            try {
+                const redirectRes = await fetch(`https://${candidate}/api/listen/mihomo`, { headers: reqOpts.headers, redirect: 'manual' });
+                if (redirectRes.status >= 300 && redirectRes.status < 400) {
+                    const loc = redirectRes.headers.get('Location');
+                    if (loc && (loc.includes('update.glados-config') || loc.includes('update.'))) subLink = loc;
                 }
-            }
-        } catch(e) {}
+            } catch(e) {}
 
-        // 2. 如果拦截失败，回退使用 status 接口解析
-        if (!subLink) {
-            const statusRes = await safeFetchJson(`https://${domain}/api/user/status`, reqOpts);
-            if (statusRes && statusRes.code === 0 && statusRes.data) {
-                if (statusRes.data.subscriptions && statusRes.data.subscriptions.mihomo) {
-                    subLink = statusRes.data.subscriptions.mihomo;
-                } else if (statusRes.data.subscriptions && statusRes.data.subscriptions.clash) {
-                    subLink = statusRes.data.subscriptions.clash;
-                } 
-                else {
-                    const userId = statusRes.data.userId || statusRes.data.configureId;
-                    const code = statusRes.data.code;
-                    const port = statusRes.data.port;
-                    if (userId && code && port) {
-                        subLink = `https://update.glados-config.com/mihomo/${userId}/${code}/${port}/glados.yaml`;
+            // 2. 若没有重定向，回退 status 接口解析
+            if (!subLink) {
+                const statusRes = await safeFetchJson(`https://${candidate}/api/user/status`, reqOpts);
+                if (statusRes && statusRes.code === 0 && statusRes.data) {
+                    if (statusRes.data.subscriptions?.mihomo) subLink = statusRes.data.subscriptions.mihomo;
+                    else if (statusRes.data.subscriptions?.clash) subLink = statusRes.data.subscriptions.clash;
+                    else {
+                        const userId = statusRes.data.userId || statusRes.data.configureId;
+                        const code = statusRes.data.code;
+                        const port = statusRes.data.port;
+                        if (userId && code && port) subLink = `https://update.glados-config.com/mihomo/${userId}/${code}/${port}/glados.yaml`;
                     }
                 }
             }
+            if (subLink) break;
         }
 
-        if (!subLink) {
-            return returnRaw ? null : `❌ <b>提取失败：无法获取账号状态</b>\n(提示：您的 Cookie 可能已失效，或 <code>${domain}</code> 接口访问受限)`;
-        }
-
+        if (!subLink) return returnRaw ? null : `❌ <b>提取失败：无法获取账号状态</b>\n(提示：您的 Cookie 可能已失效，或 GLaDOS 接口访问受限)`;
         if (subLink.includes('xxxx')) {
-            const errMsg = `❌ <b>提取失败：该账号订阅配置已被官方屏蔽隐藏 (xxxx)</b>\n\n原因：账号状态受限，或作为新账号从未激活过订阅。\n\n👉 <b>解决办法：</b>\n请在浏览器登录 <code>${domain}</code>，进入【控制台】-【订阅管理】-【FLClash】页面强制激活一次即可恢复。`;
+            const errMsg = `❌ <b>提取失败：该账号订阅配置已被官方屏蔽隐藏 (xxxx)</b>\n\n原因：账号状态受限，或作为新账号从未激活过订阅。\n\n👉 <b>解决办法：</b>\n请在浏览器登录 <code>${activeDomain}</code>，进入【控制台】-【订阅管理】-【FLClash】页面强制激活一次即可恢复。`;
             return returnRaw ? subLink : errMsg;
         }
-
-        if (returnRaw) return subLink;
-
-        return `<b>✅ 获取成功</b>\n\n<b>Mihomo / Clash 订阅：</b>\n<code>${subLink}</code>`;
+        return returnRaw ? subLink : `<b>✅ 获取成功</b>\n\n<b>Mihomo / Clash 订阅：</b>\n<code>${subLink}</code>`;
     } catch (e) {
         return returnRaw ? null : "❌ 提取失败：网络超时或发生系统异常。";
     }
 }
 
 async function getAccountDataObj(acc, doCheckin = false) {
-    const reqOpts = { headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` } };
     let data = {
         statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙", 
         pointsStr: "0", timeLeft: "0", planStr: "未知", cookieValid: false
     };
 
     try {
+        // GLaDOS 域名互通：每个接口均从可用域名回退，避免已统一的旧 Cookie 因单个域名故障失效。
         let checkinRes = null;
         if (doCheckin) {
-            checkinRes = await safeFetchJson(`https://${acc.domain}/api/user/checkin`, { 
-                ...reqOpts, method: 'POST', body: JSON.stringify({ token: acc.domain }) 
-            });
+            checkinRes = (await gladosFetchJson(acc, '/api/user/checkin', {
+                method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN })
+            })).data;
         }
 
-        let statusRes = await safeFetchJson(`https://${acc.domain}/api/user/status`, reqOpts);
-        let trafficRes = await safeFetchJson(`https://${acc.domain}/api/user/traffic`, reqOpts);
-        let pointsRes = await safeFetchJson(`https://${acc.domain}/api/user/points`, reqOpts);
+        const statusLookup = await gladosFetchJson(acc, '/api/user/status');
+        const activeAcc = { ...acc, domain: statusLookup.domain };
+        const statusRes = statusLookup.data;
+        const trafficRes = (await gladosFetchJson(activeAcc, '/api/user/traffic')).data;
+        const pointsRes = (await gladosFetchJson(activeAcc, '/api/user/points')).data;
 
         if (statusRes && statusRes.code === 0 && statusRes.data) {
             data.cookieValid = true;
@@ -1531,7 +1671,33 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
 
 
 // ================= 数据存取辅助 =================
-async function getAccounts(userId, env) { const data = await env.GLADOS_DB.get(`USER_${userId}`); return data ? JSON.parse(data) : []; }
+async function getAccounts(userId, env) {
+    const data = await env.GLADOS_DB.get(`USER_${userId}`);
+    if (!data) return [];
+    let accounts;
+    try { accounts = JSON.parse(data); } catch(e) { return []; }
+    let changed = false;
+    accounts = accounts.map(function(acc) {
+        if (acc.domain === 'nodeseek.cc') { changed = true; return { ...acc, domain: NS_DOMAIN }; }
+        if (GLADOS_DOMAINS.includes(acc.domain) && acc.domain !== GLADOS_DOMAIN) { changed = true; return { ...acc, domain: GLADOS_DOMAIN }; }
+        return acc;
+    });
+    // 合并历史数据中同一邮箱的 GLaDOS 多域名重复记录，保留最近一条 Cookie。
+    const seen = new Map();
+    const normalized = [];
+    for (const acc of accounts) {
+        const key = isGladosAccount(acc) && acc.email ? 'glados:' + acc.email.trim().toLowerCase() : '';
+        if (key && seen.has(key)) {
+            normalized[seen.get(key)] = acc;
+            changed = true;
+        } else {
+            if (key) seen.set(key, normalized.length);
+            normalized.push(acc);
+        }
+    }
+    if (changed) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(normalized));
+    return normalized;
+}
 async function getPref(userId, env) { const data = await env.GLADOS_DB.get(`PREF_${userId}`); return data ? JSON.parse(data) : { showEmail: false, checkinHour: 12 }; }
 async function getCustomSites(userId, env) { const data = await env.GLADOS_DB.get(`SITES_${userId}`); return data ? JSON.parse(data) : []; }
 async function saveUserIdForCron(userId, env) {
@@ -1572,8 +1738,8 @@ async function showSiteListMenu(chatId, messageId, userId, env) {
     const allSites = [...DEFAULT_SITES, ...customSites];
     let kb = [];
     allSites.forEach((site, index) => kb.push([{ text: `🌐 ${site}`, callback_data: `selsite_${index}` }]));
-    kb.push([{ text: "🌐 NodeLoc 自动阅读", callback_data: "add_nodeloc" }]);
-    kb.push([{ text: "🔹 NodeSeek 自动阅读", callback_data: "add_nodeseek" }]);
+    kb.push([{ text: "🌐 NodeLoc 自动签到", callback_data: "add_nodeloc" }]);
+    kb.push([{ text: "🔹 NodeSeek 自动签到", callback_data: "add_nodeseek" }]);
     kb.push([{ text: "🔧 自定义网站管理", callback_data: "site_mgr" }]);
     kb.push([{ text: "🔙 返回上级", callback_data: "account_mgr_menu" }]);
     await tgEdit(chatId, messageId, "🌐 <b>选择要添加账号的站点</b>\n\n点击下方站点按钮，或者进入自定义管理：", { inline_keyboard: kb }, env);
