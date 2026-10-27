@@ -10,6 +10,21 @@ function fixture() {
  c.tgSend = async (...args)=>sent.push(args[1]); c.tgEdit=async (...args)=>sent.push(args[2]);
  return {c,store,sent,env:{BOT_TOKEN:'dummy',GLADOS_DB:{get:async k=>store.get(k)??null,put:async(k,v)=>store.set(k,v),delete:async k=>store.delete(k)}}};
 }
+test('new gld and legacy koa cookies import separately and resolve real email',async()=>{
+ const f=fixture();
+ const raw='gld:sess=gld_dummy; gld:sess.sig=sig1\nkoa:sess=legacy; koa:sess.sig=sig2';
+ assert.equal(f.c.extractGladosCookies(raw).length,2);
+ f.store.set('TEMP_1','glados-facility.com');f.store.set('MSGID_1','1');
+ let count=0;f.c.safeFetchJson=async()=>({code:0,data:{userInfo:{email:++count===1?'first@example.com':'second@example.com'}}});
+ await f.c.processAddAccountInfo(1,1,raw,f.env);
+ const accounts=JSON.parse(f.store.get('USER_1'));assert.deepEqual(accounts.map(a=>a.email),['first@example.com','second@example.com']);
+ assert.equal(accounts[0].cookie,'gld:sess=gld_dummy; gld:sess.sig=sig1');
+});
+test('incomplete gld cookie never falls through to fake email import',async()=>{
+ const f=fixture();f.store.set('TEMP_1','glados-facility.com');f.store.set('MSGID_1','1');
+ await f.c.processAddAccountInfo(1,1,'gld:sess=dummy',f.env);
+ assert.ok(!f.store.has('USER_1'));assert.match(f.sent.at(-1),/不完整/);
+});
 test('site UI uses stable provider name, never internal fallback host',async()=>{
  const f=fixture();
  await f.c.handleCallback({id:'x',from:{id:1},message:{chat:{id:1},message_id:1},data:'selsite_0'},f.env,'https://example.com');
@@ -31,7 +46,7 @@ test('time input rejects parseInt prefix acceptance',async()=>{
 test('cookie update requires signature and leaves old cookie intact',async()=>{
  const f=fixture(); f.store.set('TEMP_1','0'); f.store.set('USER_1','[{"domain":"glados-facility.com","cookie":"old"}]');
  await f.c.processUpdateCookie(1,1,'koa:sess=new',f.env);
- assert.equal(JSON.parse(f.store.get('USER_1'))[0].cookie,'old');assert.match(f.sent.at(-1),/koa:sess.sig/);
+ assert.equal(JSON.parse(f.store.get('USER_1'))[0].cookie,'old');assert.match(f.sent.at(-1),/gld:sess.sig/);
 });
 test('subscription failure distinguishes readable status without subscription fields',async()=>{
  const f=fixture();f.c.safeFetchJson=async()=>({code:0,data:{leftDays:14}});

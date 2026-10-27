@@ -34,20 +34,24 @@ function getCookieValue(cookie, name) {
 
 // Telegram 一条消息可以用空行、普通换行或重复 Cookie: 前缀分隔多组 Cookie。
 // 每组必须同时包含 koa:sess 和 koa:sess.sig，绝不把下一组混进前一组。
+function hasGladosSession(cookie) {
+    return ['gld', 'koa'].some(prefix => getCookieValue(cookie, prefix + ':sess') && getCookieValue(cookie, prefix + ':sess.sig'));
+}
+
 function extractGladosCookies(text) {
     const rows = String(text || '').replace(/\r/g, '').split('\n');
     const cookies = [];
     let current = [];
     const flush = function() {
         const cookie = normalizeCookie(current.join('; '));
-        if (getCookieValue(cookie, 'koa:sess') && getCookieValue(cookie, 'koa:sess.sig')) cookies.push(cookie);
+        if (hasGladosSession(cookie)) cookies.push(cookie);
         current = [];
     };
     for (const row of rows) {
         const line = row.trim().replace(/^Cookie:\s*/i, '');
         if (!line) { flush(); continue; }
         // 一个新 koa:sess 表示新账号；即使用户没有留空行也可正确拆分。
-        if (/(?:^|;\s*)koa:sess=/.test(line) && current.some(function(part) { return /(?:^|;\s*)koa:sess=/.test(part); })) flush();
+        if (/(?:^|;\s*)(?:gld|koa):sess=/.test(line) && current.some(function(part) { return /(?:^|;\s*)(?:gld|koa):sess=/.test(part); })) flush();
         current.push(line);
     }
     flush();
@@ -568,6 +572,9 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         return rp("❌ 无法验证 GLaDOS Cookie，请确认已登录后重新抓取。");
     }
 
+    if (/(?:gld|koa):sess(?:\.sig)?\s*=/.test(text) && !text.split('\n').every(line => /^\s*[^\s:@]+@[^\s:]+:/.test(line))) {
+        return rp('❌ Cookie 不完整：请同时复制会话和签名，不能把 Cookie 前缀当作邮箱。');
+    }
     const lines = text.split('\n');
     let accounts = await getAccounts(userId, env);
     let accMap = new Map();
@@ -575,17 +582,17 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         const key = `${acc.domain}:${String(acc.email || '').trim().toLowerCase()}`;
         accMap.set(key, acc);
     });
-    if (lines.some(line => line.includes('koa:sess='))) {
+    if (lines.some(line => /(?:gld|koa):sess=/.test(line))) {
         const supplied = normalizeCookie(lines.map(line => line.split(':').slice(1).join(':')).join('; '));
-        if (!getCookieValue(supplied, 'koa:sess') || !getCookieValue(supplied, 'koa:sess.sig')) {
-            return rp("❌ GLaDOS Cookie 格式错误：需要同时包含 <code>koa:sess</code> 与 <code>koa:sess.sig</code>。");
+        if (!hasGladosSession(supplied)) {
+            return rp("❌ GLaDOS Cookie 格式错误：需要完整的 <code>gld:sess</code> / <code>gld:sess.sig</code>，也兼容旧版 koa 会话。");
         }
     }
 
     let added = 0, updated = 0;
     for (let line of lines) {
         const parts = line.trim().split(':');
-        if (parts.length >= 2) {
+        if (parts.length >= 2 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parts[0].trim()) && hasGladosSession(normalizeCookie(parts.slice(1).join(':')))) {
             const email = parts[0].trim();
             const emailKey = email.toLowerCase();
             const cookie = parts.slice(1).join(':').trim();
@@ -624,8 +631,8 @@ async function processUpdateCookie(chatId, userId, text, env) {
     
     const newCookie = normalizeCookie(text);
     const account = accounts[index];
-    if (!getCookieValue(newCookie, 'koa:sess') || !getCookieValue(newCookie, 'koa:sess.sig')) {
-        return rp("❌ GLaDOS Cookie 格式错误：需要同时包含 <code>koa:sess</code> 与 <code>koa:sess.sig</code>。");
+    if (!hasGladosSession(newCookie)) {
+        return rp("❌ GLaDOS Cookie 格式错误：需要完整的 <code>gld:sess</code> / <code>gld:sess.sig</code>，也兼容旧版 koa 会话。");
     }
     account.cookie = newCookie;
     account.domain = GLADOS_DOMAIN;
