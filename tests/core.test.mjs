@@ -25,6 +25,12 @@ test('incomplete gld cookie never falls through to fake email import',async()=>{
  await f.c.processAddAccountInfo(1,1,'gld:sess=dummy',f.env);
  assert.ok(!f.store.has('USER_1'));assert.match(f.sent.at(-1),/不完整/);
 });
+test('explicit email pipe cookie accepts unknown names and preserves colons',async()=>{
+ const f=fixture();f.store.set('TEMP_1','glados-facility.com');f.store.set('MSGID_1','1');
+ await f.c.processAddAccountInfo(1,1,'user@example.com|clk:xxxx=dummy:a:b; clk:xxxx.sig=signature\nsecond@example.com|gld:sess=dummy; gld:sess.sig=sig',f.env);
+ const accounts=JSON.parse(f.store.get('USER_1'));
+ assert.equal(accounts.length,2);assert.equal(accounts[0].email,'user@example.com');assert.equal(accounts[0].cookie,'clk:xxxx=dummy:a:b; clk:xxxx.sig=signature');
+});
 test('site UI uses stable provider name, never internal fallback host',async()=>{
  const f=fixture();
  await f.c.handleCallback({id:'x',from:{id:1},message:{chat:{id:1},message_id:1},data:'selsite_0'},f.env,'https://example.com');

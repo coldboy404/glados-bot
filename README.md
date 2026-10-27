@@ -92,7 +92,7 @@ GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时
 在 Telegram 里跟 bot 聊。手动批量签到和每天定时签到都会逐个显示 GLaDOS 账号结果；账号较多时会自动拆分成多条消息，避免 Telegram 长度限制。
 
 - **GLaDOS**：点「添加账号」→ 选择唯一的 GLaDOS 入口 → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。Workers 和 Pages 使用同一份站点列表与业务逻辑；界面统一显示 GLaDOS，内部优先 `glados-facility.com`，再依次回退其他已支持域名。
-Cookie 不要删减。
+Cookie 不要删减。手动指定邮箱可用 `邮箱|Cookie`，例如 `user@example.com|clk:xxxx=示例值; clk:xxxx.sig=示例签名`，每行一个账号；只按第一个 `|` 分隔，Cookie 中的冒号不参与解析。手动导入不限制 Cookie 名称，只检查邮箱及键值格式，不代表登录有效；有效性以实际账户查询为准。旧的 `邮箱:Cookie` 格式不再支持。
 
 ## 抓 Cookie（Surge / Loon / QX / Egern）
 

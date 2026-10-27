@@ -420,7 +420,7 @@ async function handleCallback(callbackQuery, env, origin) {
 
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_ACCOUNT_INFO', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, selectedSite, { expirationTtl: 300 });
-        const msg = `📝 您选择了站点: <b>GLaDOS</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱:cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
+        const msg = `📝 您选择了站点: <b>GLaDOS</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱|Cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
         await rp(msg);
     }
     else if (data === 'clear_all_confirm') {
@@ -536,7 +536,7 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     if (!domain) return rp("❌ 会话过期，请重新选择站点。");
 
     // GLaDOS Cookie 支持单条和多条粘贴；按每组 koa:sess / koa:sess.sig 拆分并逐个验证。
-    const suppliedCookies = extractGladosCookies(text);
+    const suppliedCookies = text.split('\n').some(line => /^\s*[^\s@|]+@[^\s|]+\|/.test(line)) ? [] : extractGladosCookies(text);
     if (suppliedCookies.length > 0) {
         let accounts = await getAccounts(userId, env);
         let added = 0, updated = 0, failed = 0;
@@ -572,37 +572,26 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         return rp("❌ 无法验证 GLaDOS Cookie，请确认已登录后重新抓取。");
     }
 
-    if (/(?:gld|koa):sess(?:\.sig)?\s*=/.test(text) && !text.split('\n').every(line => /^\s*[^\s:@]+@[^\s:]+:/.test(line))) {
-        return rp('❌ Cookie 不完整：请同时复制会话和签名，不能把 Cookie 前缀当作邮箱。');
-    }
-    const lines = text.split('\n');
-    let accounts = await getAccounts(userId, env);
-    let accMap = new Map();
-    accounts.forEach(acc => {
-        const key = `${acc.domain}:${String(acc.email || '').trim().toLowerCase()}`;
-        accMap.set(key, acc);
+    // Explicit separator keeps every colon inside Cookie untouched. Unknown names are allowed.
+    const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+    const parsed = lines.map(line => {
+        const separator = line.indexOf('|');
+        if (separator < 0) return null;
+        const email = line.slice(0, separator).trim();
+        const cookie = normalizeCookie(line.slice(separator + 1));
+        if (!/^[^\s@|]+@[^\s@|]+\.[^\s@|]+$/.test(email) || !cookie) return null;
+        return { email, cookie };
     });
-    if (lines.some(line => /(?:gld|koa):sess=/.test(line))) {
-        const supplied = normalizeCookie(lines.map(line => line.split(':').slice(1).join(':')).join('; '));
-        if (!hasGladosSession(supplied)) {
-            return rp("❌ GLaDOS Cookie 格式错误：需要完整的 <code>gld:sess</code> / <code>gld:sess.sig</code>，也兼容旧版 koa 会话。");
-        }
+    if (!parsed.length || parsed.some(item => !item)) {
+        return rp('❌ 格式无效或 Cookie 不完整。请发送完整 Cookie，或使用 <code>邮箱|Cookie</code>（每行一个账号）。');
     }
-
+    let accounts = await getAccounts(userId, env);
+    let accMap = new Map(accounts.map(acc => [String(acc.email || '').trim().toLowerCase(), acc]));
     let added = 0, updated = 0;
-    for (let line of lines) {
-        const parts = line.trim().split(':');
-        if (parts.length >= 2 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(parts[0].trim()) && hasGladosSession(normalizeCookie(parts.slice(1).join(':')))) {
-            const email = parts[0].trim();
-            const emailKey = email.toLowerCase();
-            const cookie = parts.slice(1).join(':').trim();
-            
-            const accountKey = `${GLADOS_DOMAIN}:${emailKey}`;
-            if (accMap.has(accountKey)) updated++;
-            else added++;
-            
-            accMap.set(accountKey, { domain: GLADOS_DOMAIN, email, cookie });
-        }
+    for (const { email, cookie } of parsed) {
+        const key = email.toLowerCase();
+        if (accMap.has(key)) updated++; else added++;
+        accMap.set(key, { ...accMap.get(key), domain: GLADOS_DOMAIN, email, cookie });
     }
 
     accounts = Array.from(accMap.values()).map(function(account) {
