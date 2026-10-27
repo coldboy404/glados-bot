@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      runtime_probe:
+        description: 'Temporary minimal-source diagnostic; only before webhook migration'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -42,7 +47,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Isolate runtime from application source
+        if: github.event_name == 'workflow_dispatch' && inputs.runtime_probe
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Bot still points to Pages; temporarily isolate this not-yet-live Worker.
+          printf '%s\n' 'export default { fetch() { return new Response("runtime-probe-ok"); } };' > runtime-probe.js
+          npx --yes wrangler@4.153.0 deploy runtime-probe.js --keep-vars
+          code=$(curl --silent --show-error --max-time 20 --output probe.txt --write-out '%{http_code}' https://glados-bot.jwpgod.workers.dev/)
+          echo "Minimal runtime probe HTTP: $code"
+          if [ "$code" = '200' ] && [ "$(cat probe.txt)" = 'runtime-probe-ok' ]; then
+            echo 'Minimal source works: investigate application initialization next.'
+          else
+            echo 'Minimal source also fails: application fingerprint is not established as the cause.'
+          fi
       - name: Deploy existing Worker with Dashboard variables preserved
+        if: always()
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
