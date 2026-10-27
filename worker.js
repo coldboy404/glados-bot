@@ -820,13 +820,14 @@ async function getSubAndHost(domain, cookie, returnRaw = false) {
     try {
         let subLink = null;
         let activeDomain = domain;
+        let statusAvailable = false;
         const candidateDomains = GLADOS_DOMAINS.includes(domain) ? [domain].concat(GLADOS_DOMAINS.filter(function(d) { return d !== domain; })) : [domain];
         for (const candidate of candidateDomains) {
             activeDomain = candidate;
             const reqOpts = { headers: { ...HEADERS, 'cookie': cookie, 'origin': `https://${candidate}` } };
             // 1. 优先尝试拦截 302 真实重定向接口
             try {
-                const redirectRes = await fetch(`https://${candidate}/api/listen/mihomo`, { headers: reqOpts.headers, redirect: 'manual' });
+                const redirectRes = await fetch(`https://${candidate}/api/listen/mihomo`, { headers: reqOpts.headers, redirect: 'manual', signal: AbortSignal.timeout(6000) });
                 if (redirectRes.status >= 300 && redirectRes.status < 400) {
                     const loc = redirectRes.headers.get('Location');
                     if (loc && (loc.includes('update.glados-config') || loc.includes('update.'))) subLink = loc;
@@ -837,6 +838,7 @@ async function getSubAndHost(domain, cookie, returnRaw = false) {
             if (!subLink) {
                 const statusRes = await safeFetchJson(`https://${candidate}/api/user/status`, reqOpts);
                 if (statusRes && statusRes.code === 0 && statusRes.data) {
+                    statusAvailable = true;
                     if (statusRes.data.subscriptions?.mihomo) subLink = statusRes.data.subscriptions.mihomo;
                     else if (statusRes.data.subscriptions?.clash) subLink = statusRes.data.subscriptions.clash;
                     else {
@@ -850,7 +852,9 @@ async function getSubAndHost(domain, cookie, returnRaw = false) {
             if (subLink) break;
         }
 
-        if (!subLink) return returnRaw ? null : `❌ <b>提取失败：无法获取账号状态</b>\n(提示：您的 Cookie 可能已失效，或 GLaDOS 接口访问受限)`;
+        if (!subLink) return returnRaw ? null : (statusAvailable
+            ? '❌ 账号状态可读取，但接口未返回可用的 Mihomo / Clash 订阅地址。请在官网订阅页面确认；不能据此判定 Cookie 失效。'
+            : '❌ 未取得可用的账号状态或订阅地址，可能是接口超时、访问受限或登录失效，当前无法区分。');
         if (subLink.includes('xxxx')) {
             const errMsg = `❌ <b>提取失败：该账号订阅配置已被官方屏蔽隐藏 (xxxx)</b>\n\n原因：账号状态受限，或作为新账号从未激活过订阅。\n\n👉 <b>解决办法：</b>\n请在浏览器登录 <code>${activeDomain}</code>，进入【控制台】-【订阅管理】-【FLClash】页面强制激活一次即可恢复。`;
             return returnRaw ? subLink : errMsg;
@@ -1141,7 +1145,12 @@ async function tgSendResultList(chatId, heading, items, env, keyboard = null) {
 async function tgSend(chatId, text, env, keyboard = null) {
     const payload = { chat_id: chatId, text: text, parse_mode: 'HTML', disable_web_page_preview: true };
     if (keyboard) payload.reply_markup = keyboard;
-    try { await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); } catch (e) {}
+    const result = await telegramApi(env, 'sendMessage', payload);
+    if (!result.ok) {
+        console.log('Telegram sendMessage failed', JSON.stringify({ code: result.error_code || null, description: result.description || 'unknown' }));
+        throw new Error('Telegram message delivery failed');
+    }
+    return result;
 }
 
 async function tgEdit(chatId, msgId, text, keyboard, env) {

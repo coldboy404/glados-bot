@@ -68,6 +68,11 @@ test('timer validates configuration and suppresses exception details', async () 
     assert.equal(result.status, 500);
     assert.ok(!(await result.text()).includes('SECRET'));
 });
+test('Telegram business delivery failure rejects and cannot silently pass', async () => {
+    const f = fixture();
+    f.context.fetch = async () => Response.json({ok:false,error_code:400,description:'Bad Request'});
+    await assert.rejects(f.context.tgSend(200, 'hello', f.env), /delivery failed/);
+});
 test('Pages manual batch persists then runs within authenticated timer request', async () => {
     const f = fixture();
     f.env.CF_PAGES = '1';

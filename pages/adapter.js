@@ -33,7 +33,7 @@ export default {
                 await env.GLADOS_DB.delete(taskKey);
             }
             await handleScheduled(env);
-            return Response.json({ ok: true });
+            return Response.json({ ok: true, taskProcessed: Boolean(pending), version: 'pages-delivery-diagnostics-v1' });
         } catch (_) {
             // Never return an upstream exception that might contain a Cookie or Bot Token.
             return Response.json({ ok: false, error: 'Scheduled task failed' }, { status: 500 });

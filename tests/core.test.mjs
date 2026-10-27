@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 function fixture() {
  const store = new Map(), sent = [];
- const c = vm.createContext({Request,Response,URL,TextEncoder,crypto,console,Date,Intl,
+ const c = vm.createContext({Request,Response,URL,TextEncoder,crypto,console,Date,Intl,AbortSignal,
  setTimeout:()=>1,clearTimeout(){},fetch:async()=>Response.json({ok:true})});
  vm.runInContext(readFileSync('worker.js','utf8').replace('export default {','globalThis.worker = {'),c);
  c.tgSend = async (...args)=>sent.push(args[1]); c.tgEdit=async (...args)=>sent.push(args[2]);
@@ -32,6 +32,11 @@ test('cookie update requires signature and leaves old cookie intact',async()=>{
  const f=fixture(); f.store.set('TEMP_1','0'); f.store.set('USER_1','[{"domain":"glados-facility.com","cookie":"old"}]');
  await f.c.processUpdateCookie(1,1,'koa:sess=new',f.env);
  assert.equal(JSON.parse(f.store.get('USER_1'))[0].cookie,'old');assert.match(f.sent.at(-1),/koa:sess.sig/);
+});
+test('subscription failure distinguishes readable status without subscription fields',async()=>{
+ const f=fixture();f.c.safeFetchJson=async()=>({code:0,data:{leftDays:14}});
+ const result=await f.c.getSubAndHost('glados-facility.com','dummy');
+ assert.match(result,/账号状态可读取/);assert.ok(!result.includes('无法获取账号状态'));
 });
 test('status timeout remains unknown and skips traffic and points requests',async()=>{
  const f=fixture();const paths=[];
