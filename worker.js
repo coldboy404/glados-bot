@@ -82,8 +82,10 @@ function gladosCheckinSucceeded(result) {
 async function gladosFetchJson(acc, path, options) {
     const opts = options || {};
     for (const domain of gladosRequestDomains(acc)) {
+        const requestBody = path.endsWith('/checkin') ? JSON.stringify({ token: domain }) : opts.body;
         const result = await safeFetchJson('https://' + domain + path, {
             ...opts,
+            body: requestBody,
             headers: { ...HEADERS, ...(opts.headers || {}), 'cookie': acc.cookie, 'origin': 'https://' + domain }
         });
         if (!result) continue;
@@ -932,14 +934,16 @@ async function getAccountDataObj(acc, doCheckin = false) {
             if (doCheckin) {
                 if (checkinRes) {
                     const rawMess = String(checkinRes.message || checkinRes.msg || "");
-                    if (!gladosBusinessAuthFailure(checkinRes) && /tomorrow|already|已签到/i.test(rawMess)) {
+                    if (!gladosBusinessAuthFailure(checkinRes) && (checkinRes.code === 1 || /tomorrow|already|已签到/i.test(rawMess))) {
                         data.statusMsg = "🔁 已签到";
                         data.checkinState = "already";
                     } else if (gladosCheckinSucceeded(checkinRes)) {
                         data.statusMsg = "✅ 签到成功";
                         data.checkinState = "success";
                     } else {
-                        data.statusMsg = /automated check.?in detected/i.test(rawMess)
+                        data.statusMsg = checkinRes.code === 4 && checkinRes.reason === 'device-mismatch'
+                            ? '❌ 登录设备不匹配，请用登录时的设备重新获取 Cookie（设备：' + String(checkinRes.loginDevice || '未知') + '）'
+                            : /automated check.?in detected/i.test(rawMess)
                             ? '❌ GLaDOS 拒绝自动签到，请在官网重新登录并更新 Cookie'
                             : `❌ ${rawMess || '签到失败'}`;
                         data.checkinState = "failed";

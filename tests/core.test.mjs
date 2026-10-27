@@ -31,6 +31,13 @@ test('explicit email pipe cookie accepts unknown names and preserves colons',asy
  const accounts=JSON.parse(f.store.get('USER_1'));
  assert.equal(accounts.length,2);assert.equal(accounts[0].email,'user@example.com');assert.equal(accounts[0].cookie,'clk:xxxx=dummy:a:b; clk:xxxx.sig=signature');
 });
+test('checkin fallback uses token matching each actual request domain',async()=>{
+ const f=fixture(); const calls=[];
+ f.c.safeFetchJson=async(url,opts)=>{calls.push({url,body:JSON.parse(opts.body)});return calls.length===1?null:{code:0};};
+ await f.c.gladosFetchJson({domain:'glados-facility.com',cookie:'dummy'},'/api/user/checkin',{method:'POST',body:JSON.stringify({token:'wrong'})});
+ assert.equal(calls.length,2);
+ for(const call of calls)assert.equal(call.body.token,new URL(call.url).hostname);
+});
 test('site UI uses stable provider name, never internal fallback host',async()=>{
  const f=fixture();
  await f.c.handleCallback({id:'x',from:{id:1},message:{chat:{id:1},message_id:1},data:'selsite_0'},f.env,'https://example.com');
