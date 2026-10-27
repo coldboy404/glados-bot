@@ -9,7 +9,54 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 - **健康监控** — 菜单显示账号状态；Cookie 失效自动标红，签到失败主动推送告警。
 - **Telegram 管理** — 绑定账号、看状态、手动签到，都在对话框完成。
 
-## 部署
+## Cloudflare Pages 版（新增）
+
+原 Workers 版保持不变；Pages 版复用同一份业务代码，支持原有 Telegram 菜单、多账号、域名回退和签到结果通知。
+
+### 1. 创建 Pages 项目
+
+在 Cloudflare → Workers & Pages → 创建 → **Pages** → 连接此 GitHub 仓库：
+
+- 生产分支：`main`
+- 框架预设：None
+- 构建命令：`npm run build:pages`
+- 构建输出目录：`pages/dist`
+- 根目录：仓库根目录，留空即可
+
+这是 Pages Git 集成，不是 Workers Builds；不要使用 `npx wrangler deploy`。构建脚本从 `worker.js` 生成 advanced-mode `_worker.js`，无需手动复制代码，也不需要安装依赖。根目录的 `wrangler.toml` 仍只服务原 Workers 版，没有 `pages_build_output_dir`，不作为 Pages 配置；Pages 绑定和变量在 Dashboard 设置。
+
+### 2. 设置生产环境绑定和变量
+
+Pages 项目 → Settings → Bindings，添加 KV 绑定 **`GLADOS_DB`**，选择已有命名空间可保留原账号和偏好。Settings → Variables and Secrets 配置：
+
+| 名称 | 类型 | 值 |
+|---|---|---|
+| `BOT_TOKEN` | Secret | BotFather Token |
+| `ADMIN_ID` | Secret 或 Text | 管理员 Telegram 数字 ID |
+| `WEBHOOK_URL` | Text | `https://你的Pages域名/webhook`，也支持自定义域名 |
+| `CRON_SECRET` | Secret | 自行生成至少 32 字符随机密钥，例如执行 `openssl rand -hex 32` |
+
+修改绑定或变量后重新部署生产环境。不要在预览环境配置同一个生产 Bot Token，以免预览部署抢占 webhook。
+
+### 3. 启用自动签到和 Token 自动恢复
+
+**Pages 不支持 Cron Triggers**。仓库提供外部 GitHub Actions 定时器，每五分钟通过受密钥保护的 `POST /internal/cron` 驱动 Pages；实际签到仍遵循 Telegram 菜单设置的北京时间小时，按当前管理员、每天去重。请求会等待本轮任务结束，不依赖 Pages 的短生命周期后台任务。
+
+GitHub 仓库 → Settings → Secrets and variables → Actions：
+
+- Variables：`DEPLOY_TARGET` = `pages`
+- Variables：`PAGES_URL` = `https://你的Pages域名`（仅 origin，不加路径）
+- Secrets：`PAGES_CRON_SECRET` = 上面的 `CRON_SECRET`
+
+部署完成后进入 Actions → **Pages scheduled tasks** → Run workflow，首次运行会注册 Telegram webhook 和命令。以后更换 `BOT_TOKEN`，重新部署后由定时器自动恢复。未设置 `DEPLOY_TARGET=pages` 时，此工作流会跳过，不影响原 Workers 用户。
+
+GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时都未触发，会错过当天设置时段。需要更稳定的调度时，可改用自己的定时器每五分钟向同一路径 POST，并发送 `Authorization: Bearer <CRON_SECRET>`，不要同时开启多个定时器。KV 的去重不是原子锁，仓库工作流通过 concurrency 串行执行。超大账号批次仍受 Cloudflare 请求/子请求配额和 HTTP 超时约束，超时不等于后台一定完成，应检查 Telegram 实际结果。
+
+**从 Workers 迁移：**在停用旧 Worker 的业务 Cron 后再开启 Pages 定时器，避免重复执行；同一个 Bot 只能有一个 webhook，注册 Pages 地址会将 Telegram 消息切换到 Pages。不要直接删除旧 KV。原 Worker 的 Token 自动恢复 Cron 也应关闭，避免把 webhook 改回旧地址。
+
+本地验证：`npm test && npm run build:pages && node --check pages/dist/_worker.js`。本仓库仅构建 Pages 产物，不会自动创建或部署新的 Cloudflare 项目。
+
+## Workers 版部署
 
 在 Cloudflare Dashboard 的 `glados-bot` 中配置 `BOT_TOKEN`、`ADMIN_ID` 和 `WEBHOOK_URL`。
 

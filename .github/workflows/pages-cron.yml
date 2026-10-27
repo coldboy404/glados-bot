@@ -1,0 +1,30 @@
+name: Pages scheduled tasks
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: glados-pages-cron
+  cancel-in-progress: false
+jobs:
+  tick:
+    if: ${{ vars.DEPLOY_TARGET == 'pages' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger authenticated Pages timer
+        env:
+          PAGES_URL: ${{ vars.PAGES_URL }}
+          CRON_SECRET: ${{ secrets.PAGES_CRON_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$PAGES_URL" =~ ^https://[^/?#]+/?$ ]] || [[ ${#CRON_SECRET} -lt 32 ]]; then
+            printf '%s\n' 'Configure PAGES_URL (HTTPS origin) and PAGES_CRON_SECRET (at least 32 characters).'
+            exit 1
+          fi
+          curl --silent --show-error --fail-with-body --connect-timeout 15 --max-time 780 \
+            --request POST --header "Authorization: Bearer $CRON_SECRET" \
+            "${PAGES_URL%/}/internal/cron"

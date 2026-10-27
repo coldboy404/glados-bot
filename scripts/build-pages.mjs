@@ -1,0 +1,10 @@
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+const root = new URL('../', import.meta.url);
+const source = await readFile(new URL('worker.js', root), 'utf8');
+const marker = 'export default {';
+if (source.split(marker).length !== 2) throw new Error('Expected exactly one Worker export');
+const adapter = await readFile(new URL('pages/adapter.js', root), 'utf8');
+const output = source.replace(marker, 'const worker = {') + '\n' + adapter;
+await mkdir(new URL('pages/dist/', root), { recursive: true });
+await writeFile(new URL('pages/dist/_worker.js', root), output);
+console.log('Built pages/dist/_worker.js from shared worker.js + Pages adapter');
