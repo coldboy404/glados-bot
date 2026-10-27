@@ -17,7 +17,7 @@ function fixture() {
         setTimeout: (fn) => { fn(); return 0; }, clearTimeout() {},
         fetch: async (url, options) => {
             calls.push({ url: String(url), body: options?.body });
-            return Response.json({ ok: true });
+            return Response.json({ ok: true, result: { url: 'https://bot.example.com/webhook' } });
         }
     });
     vm.runInContext(built.replace('export default {', 'globalThis.app = {'), context);
@@ -67,6 +67,29 @@ test('timer validates configuration and suppresses exception details', async () 
     const result = await f.context.app.fetch(f.request(), f.env, f.ctx);
     assert.equal(result.status, 500);
     assert.ok(!(await result.text()).includes('SECRET'));
+});
+test('same token with stale Worker webhook is repaired on Pages migration', async () => {
+    const f = fixture();
+    await f.context.app.fetch(f.request(), f.env, f.ctx);
+    f.calls.length = 0;
+    f.context.fetch = async (url, options) => {
+        f.calls.push({url: String(url), body: options?.body});
+        return Response.json({ok: true, result: {url: 'https://old-worker.example.com/webhook'}});
+    };
+    const response = await f.context.app.fetch(f.request(), f.env, f.ctx);
+    assert.equal(response.status, 200);
+    const registration = f.calls.find(c => c.url.endsWith('/setWebhook'));
+    assert.equal(JSON.parse(registration.body).url, f.env.WEBHOOK_URL);
+});
+test('registration failure and missing URL cannot report timer success', async () => {
+    for (const missingUrl of [true, false]) {
+        const f = fixture();
+        if (missingUrl) delete f.env.WEBHOOK_URL;
+        else f.context.fetch = async () => Response.json({ok: false, description: 'Unauthorized'});
+        const response = await f.context.app.fetch(f.request(), f.env, f.ctx);
+        assert.equal(response.status, 500);
+        assert.equal(f.data.has('SYSTEM_BOT_TOKEN_FINGERPRINT'), false);
+    }
 });
 test('timer reconciles token only once and checks only current admin once per day', async () => {
     const f = fixture();

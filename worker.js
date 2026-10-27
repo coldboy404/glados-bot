@@ -141,14 +141,18 @@ async function reconcileTelegramWebhook(env) {
     if (!env.BOT_TOKEN || !env.GLADOS_DB) return;
     const fingerprint = await botTokenFingerprint(env.BOT_TOKEN);
     const savedFingerprint = await env.GLADOS_DB.get('SYSTEM_BOT_TOKEN_FINGERPRINT');
-    if (savedFingerprint === fingerprint) return;
 
     // 新 Token 无法读取旧 Token 保存的 getWebhookInfo，因此 webhook URL 必须作为
     // 非敏感 Dashboard Text 变量 WEBHOOK_URL 维持不变。
     const webhookUrl = String(env.WEBHOOK_URL || '').trim().replace(/\/$/, '');
     if (!/^https:\/\/.+\/webhook(?:\?.*)?$/.test(webhookUrl)) {
         console.log('Webhook 自动恢复跳过：WEBHOOK_URL 未配置或格式无效');
-        return;
+        throw new Error('WEBHOOK_URL 未配置或格式无效');
+    }
+    // Same token may migrate from Workers to Pages, or another deployment may reclaim it.
+    if (savedFingerprint === fingerprint) {
+        const info = await telegramApi(env, 'getWebhookInfo');
+        if (info.ok && info.result && info.result.url === webhookUrl && !info.result.last_error_message) return;
     }
 
     const [webhookResult, deleteCommandsResult, commandsResult] = await Promise.all([
@@ -165,6 +169,7 @@ async function reconcileTelegramWebhook(env) {
             deleteCommands: deleteCommandsResult.description,
             commands: commandsResult.description
         }));
+        throw new Error('Telegram webhook registration failed');
     }
 }
 
