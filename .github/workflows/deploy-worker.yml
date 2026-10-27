@@ -57,7 +57,9 @@ jobs:
           set -euo pipefail
           # Bot still points to Pages; temporarily isolate this not-yet-live Worker.
           printf '%s\n' 'export default { fetch() { return new Response("runtime-probe-ok"); } };' > runtime-probe.js
-          npx --yes wrangler@4.153.0 deploy runtime-probe.js --keep-vars
+          printf '%s\n' 'name = "glados-bot"' 'main = "runtime-probe.js"' 'compatibility_date = "2026-04-30"' 'workers_dev = true' 'keep_vars = true' > runtime-probe.toml
+          # Remove inherited bindings/triggers from the probe; always restore root config afterwards.
+          npx --yes wrangler@4.153.0 deploy --config runtime-probe.toml --keep-vars
           code=$(curl --silent --show-error --max-time 20 --output probe.txt --write-out '%{http_code}' https://glados-bot.jwpgod.workers.dev/)
           echo "Minimal runtime probe HTTP: $code"
           if [ "$code" = '200' ] && [ "$(cat probe.txt)" = 'runtime-probe-ok' ]; then
