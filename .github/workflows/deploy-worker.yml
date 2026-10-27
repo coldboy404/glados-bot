@@ -47,3 +47,41 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx --yes wrangler@4.153.0 deploy --keep-vars
+      - name: Verify live Worker and capture runtime exceptions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          subdomain=$(curl --silent --show-error --fail \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["subdomain"])')
+          url="https://glados-bot.$subdomain.workers.dev/"
+          timeout 35s npx --yes wrangler@4.153.0 tail glados-bot --format json > runtime-tail.json 2>runtime-tail.stderr &
+          tail_pid=$!
+          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+          sleep 8
+          code=$(curl --silent --show-error --max-time 20 --output health.json --write-out '%{http_code}' "$url")
+          sleep 5
+          if [ "$code" != '200' ]; then
+            echo "Worker health failed: HTTP $code. Webhook must not be migrated yet."
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path('runtime-tail.json').read_text()
+          decoder = json.JSONDecoder()
+          while raw.strip():
+              raw = raw.lstrip()
+              try:
+                  event, end = decoder.raw_decode(raw)
+              except ValueError:
+                  break
+              for error in event.get('exceptions', []):
+                  print(error.get('name'), error.get('message'))
+              raw = raw[end:]
+          PY
+            exit 1
+          fi
+          python3 -c 'import json; assert json.load(open("health.json")).get("status") == "running"'
