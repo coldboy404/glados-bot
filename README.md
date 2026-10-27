@@ -89,7 +89,7 @@ GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时
 
 在 Telegram 里跟 bot 聊。手动批量签到和每天定时签到都会逐个显示 GLaDOS 账号结果；账号较多时会自动拆分成多条消息，避免 Telegram 长度限制。
 
-- **GLaDOS**：点「添加账号」→ 选择唯一的 `glados.network` → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。
+- **GLaDOS**：点「添加账号」→ 选择唯一的 GLaDOS 入口 → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。Workers 和 Pages 使用同一份站点列表与业务逻辑；界面统一显示 GLaDOS，内部优先 `glados-facility.com`，再依次回退其他已支持域名。
 Cookie 不要删减。
 
 ## 抓 Cookie（Surge / Loon / QX / Egern）

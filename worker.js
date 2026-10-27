@@ -402,7 +402,7 @@ async function handleCallback(callbackQuery, env, origin) {
     }
     else if (data === 'set_cron_time') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_CRON_TIME', { expirationTtl: 120 });
-        await rp("⏰ <b>请回复数字 (0-23)</b>\n\n⚠️ 必须为整点！\n例如输入 <code>12</code> 代表每天中午 12:00 左右签到\n<i>(系统具有±10分钟容错，防止漏签)</i>");
+        await rp("⏰ <b>请回复数字 (0-23)</b>\n\n⚠️ 必须为整点！\n例如输入 <code>12</code> 代表每天中午 12:00 左右签到\n<i>(定时器在设定小时内检查，实际执行可能延迟)</i>");
     }
     // --- 其他辅助 ---
     else if (data === 'add_account') {
@@ -416,7 +416,7 @@ async function handleCallback(callbackQuery, env, origin) {
 
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_ACCOUNT_INFO', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, selectedSite, { expirationTtl: 300 });
-        const msg = `📝 您选择了站点: <b>${selectedSite}</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱:cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
+        const msg = `📝 您选择了站点: <b>GLaDOS</b>\n\n<b>发送 Cookie 即可</b>，Bot 自动提取邮箱。\n\n手动格式：<code>邮箱:cookie</code>（一行一个）\n\n💡 浏览器 F12 → Application → Cookies → 复制完整 Cookie 发送。`;
         await rp(msg);
     }
     else if (data === 'clear_all_confirm') {
@@ -449,7 +449,7 @@ async function handleCallback(callbackQuery, env, origin) {
                     [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
                 ]
             };
-            await tgEdit(chatId, messageId, `⚙️ <b>管理账户</b>\n\n当前账户：<code>${maskEmail(acc.email || acc.username || '?', pref.showEmail)}</code>\n所属站点：<code>${acc.domain}</code>\n\n请选择操作：`, kb, env);
+            await tgEdit(chatId, messageId, `⚙️ <b>管理账户</b>\n\n当前账户：<code>${maskEmail(acc.email || acc.username || '?', pref.showEmail)}</code>\n所属站点：<code>GLaDOS</code>\n\n请选择操作：`, kb, env);
         } else if (action === 'exchange') {
             await showExchangePlans(chatId, messageId, index, acc, userId, env);
         } else if (action === 'sub') {
@@ -506,6 +506,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const acc = accounts[index];
         const pref = await getPref(userId, env);
         
+        if (!acc || !['plan100', 'plan200', 'plan500'].includes(plan)) return rp('❌ 账号或套餐无效');
         await rp(`⏳ 正在为您兑换套餐，请稍候...`);
         const result = await safeFetchJson(`https://${acc.domain}/api/user/exchange`, {
             method: 'POST', headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` },
@@ -513,7 +514,7 @@ async function handleCallback(callbackQuery, env, origin) {
         });
         
         const accData = await getAccountDataObj(acc, false); 
-        accData.statusMsg = (result && result.message) ? `✅ ${result.message}` : '✅ 兑换操作完成';
+        accData.statusMsg = result && result.code === 0 ? '✅ 兑换成功' : '❌ 兑换失败：' + String(result && result.message || '请求失败，请稍后查询账户确认');
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, false);
         await rp(msgStr);
     }
@@ -623,8 +624,8 @@ async function processUpdateCookie(chatId, userId, text, env) {
     
     const newCookie = normalizeCookie(text);
     const account = accounts[index];
-    if (!getCookieValue(newCookie, 'koa:sess')) {
-        return rp("❌ GLaDOS Cookie 格式错误：需要包含 <code>koa:sess</code>。");
+    if (!getCookieValue(newCookie, 'koa:sess') || !getCookieValue(newCookie, 'koa:sess.sig')) {
+        return rp("❌ GLaDOS Cookie 格式错误：需要同时包含 <code>koa:sess</code> 与 <code>koa:sess.sig</code>。");
     }
     account.cookie = newCookie;
     account.domain = GLADOS_DOMAIN;
@@ -640,8 +641,9 @@ async function processUpdateCookie(chatId, userId, text, env) {
 
 async function processCronTime(chatId, userId, text, env) {
     await env.GLADOS_DB.delete(`STATE_${userId}`);
-    let hour = parseInt(text.trim());
-    if (isNaN(hour) || hour < 0 || hour > 23) return tgSend(chatId, "❌ 输入无效，请输入 0 到 23。", env);
+    const input = text.trim();
+    let hour = Number(input);
+    if (!/^\d{1,2}$/.test(input) || !Number.isInteger(hour) || hour < 0 || hour > 23) return tgSend(chatId, "❌ 输入无效，请输入 0 到 23。", env);
     const pref = await getPref(userId, env);
     pref.checkinHour = hour;
     await env.GLADOS_DB.put(`PREF_${userId}`, JSON.stringify(pref));
@@ -685,8 +687,12 @@ async function executeTask(task, env, origin) {
                     method: 'POST', headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` },
                     body: JSON.stringify({ planType: plan })
                 });
-                const data = await getAccountDataObj(acc, false); 
-                data.statusMsg = (exchRes && exchRes.message) ? `✅ ${exchRes.message}` : '✅ 兑换成功';
+                if (!exchRes || exchRes.code !== 0) {
+                    msgs.push(`${i + 1}. ${maskEmail(acc.email, pref.showEmail)} | ❌ 兑换失败`);
+                    continue;
+                }
+                const data = await getAccountDataObj(acc, false);
+                data.statusMsg = '✅ 兑换成功';
                 newSuccessList.push(formatAccountString(acc, i + 1, accounts.length, pref, data, true, false));
             }
         }
@@ -707,6 +713,7 @@ async function executeTask(task, env, origin) {
         await tgSend(chatId, msgs.join("\n"), env);
     }
 
+    if (type === 'batch_exchange' && msgs.length && chatId) await tgSend(chatId, msgs.join('\n'), env);
     if (endIndex < accounts.length) {
         await executeTask({ type, chatId, userId, startIndex: endIndex, plan, successList: newSuccessList, resultList: newResultList }, env, origin);
     } else {
@@ -723,7 +730,7 @@ async function executeTask(task, env, origin) {
                     }
                     await tgSend(chatId, `🎉 <b>批量兑换彻底完成！</b>\n共计 <b>${newSuccessList.length}</b> 个账号满足条件并成功进行了兑换。`, env, doneKb);
                 } else {
-                    await tgSend(chatId, `ℹ️ <b>批量兑换完成</b>\n未发现满足所需积分门槛的账号，因此跳过了所有账号。`, env, doneKb);
+                    await tgSend(chatId, `ℹ️ <b>批量兑换完成</b>\n本次没有成功兑换的账号；积分不足会跳过，请同时查看上方失败结果。`, env, doneKb);
                 }
             } else if (type === 'sub_all') {
                 await tgSend(chatId, `✅ <b>全部 ${accounts.length} 个账号的订阅配置提取完毕！</b>`, env, doneKb);
@@ -786,10 +793,11 @@ async function safeFetchJson(url, options) {
     try {
         const controller = new AbortController();
         const id = setTimeout(() => controller.abort(), 6000);
-        const res = await fetch(url, { ...options, signal: controller.signal });
-        clearTimeout(id);
-        if (!res.ok) return null;
-        return await res.json();
+        try {
+            const res = await fetch(url, { ...options, signal: controller.signal });
+            if (!res.ok) return null;
+            return await res.json();
+        } finally { clearTimeout(id); }
     } catch (e) { return null; }
 }
 
@@ -908,7 +916,7 @@ async function getAccountDataObj(acc, doCheckin = false) {
             if (doCheckin) {
                 if (checkinRes) {
                     const rawMess = String(checkinRes.message || checkinRes.msg || "");
-                    if (/observation logged|tomorrow|already|已签到/i.test(rawMess)) {
+                    if (!gladosBusinessAuthFailure(checkinRes) && /tomorrow|already|已签到/i.test(rawMess)) {
                         data.statusMsg = "🔁 已签到";
                         data.checkinState = "already";
                     } else if (gladosCheckinSucceeded(checkinRes)) {
@@ -941,7 +949,7 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
     str += `📧 ${maskEmail(acc.email, pref.showEmail)}\n`;
     str += ` ├ 🌐 站点: glados\n`;
     str += ` ├ 🍪 Cookie: ${data.cookieValid ? '✅ 有效' : '❌ 已失效'}\n`;
-    if (includeStatus) str += ` ├ 📝 状态: ${data.statusMsg}\n`;
+    if (includeStatus) str += ` ├ 📝 状态: ${escapeHtml(data.statusMsg)}\n`;
     str += ` ├ 📊 流量: ${data.trafficStr}\n`;
     str += ` ├ ${data.medal} 积分: ${data.pointsStr}\n`;
     str += ` ├ ⏳ 剩余: ${data.timeLeft} 天 (${data.planStr})`;
@@ -950,7 +958,7 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
 }
 
 function formatCheckinResultRow(acc, index, pref, data) {
-    const status = data.statusMsg || '❌ 签到失败';
+    const status = escapeHtml(data.statusMsg || '❌ 签到失败');
     const change = data.checkinState === 'success' && data.pointChange && data.pointChange !== '0' ? data.pointChange : '-';
     return `${index}. ${maskEmail(acc.email, pref.showEmail)} | ${status} | 本次:${change} | 剩余积分:${data.pointBalance || '0'} | 剩余:${data.timeLeft || '0'} 天`;
 }
@@ -970,9 +978,10 @@ async function getAccounts(userId, env) {
     let accounts;
     try { accounts = JSON.parse(data); } catch(e) { return []; }
     let changed = false;
+    if (!Array.isArray(accounts)) return [];
     accounts = accounts
         .filter(function(acc) {
-            const keep = GLADOS_DOMAINS.includes(acc.domain);
+            const keep = acc && typeof acc === 'object' && GLADOS_DOMAINS.includes(acc.domain);
             if (!keep) changed = true;
             return keep;
         })
@@ -984,7 +993,7 @@ async function getAccounts(userId, env) {
     const seen = new Map();
     const normalized = [];
     for (const acc of accounts) {
-        const key = acc.email ? 'glados:' + acc.email.trim().toLowerCase() : '';
+        const key = acc.email ? 'glados:' + String(acc.email).trim().toLowerCase() : '';
         if (key && seen.has(key)) {
             normalized[seen.get(key)] = acc;
             changed = true;
@@ -996,7 +1005,14 @@ async function getAccounts(userId, env) {
     if (changed) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(normalized));
     return normalized;
 }
-async function getPref(userId, env) { const data = await env.GLADOS_DB.get(`PREF_${userId}`); return data ? JSON.parse(data) : { showEmail: false, checkinHour: 12 }; }
+async function getPref(userId, env) {
+    let pref = {};
+    try { pref = JSON.parse(await env.GLADOS_DB.get(`PREF_${userId}`)) || {}; } catch (_) {}
+    return {
+        showEmail: pref.showEmail === true,
+        checkinHour: Number.isInteger(pref.checkinHour) && pref.checkinHour >= 0 && pref.checkinHour <= 23 ? pref.checkinHour : 12
+    };
+}
 // 定时签到仅使用当前 ADMIN_ID；保留这个空操作兼容已有的账号导入调用，
 // 不再向 ALL_USERS 写入历史管理员，从源头避免 ADMIN_ID 变更后串号。
 async function saveUserIdForCron(userId, env) {}
