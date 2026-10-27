@@ -22,7 +22,7 @@ function fixture() {
     });
     vm.runInContext(built.replace('export default {', 'globalThis.app = {'), context);
     const env = {
-        CRON_SECRET: 's'.repeat(32), BOT_TOKEN: '123:dummy', ADMIN_ID: '200',
+        BOT_TOKEN: '123:dummy', ADMIN_ID: '200',
         WEBHOOK_URL: 'https://bot.example.com/webhook',
         GLADOS_DB: {
             get: async key => data.get(key) ?? null,
@@ -30,7 +30,7 @@ function fixture() {
             delete: async key => data.delete(key)
         }
     };
-    const request = (method = 'POST', token = env.CRON_SECRET, path = '/internal/cron') => new Request('https://bot.example.com' + path, {
+    const request = (method = 'POST', token = '123:dummy', path = '/internal/cron') => new Request('https://bot.example.com' + path, {
         method, headers: { Authorization: 'Bearer ' + token }
     });
     const ctx = { waitUntil() { throw new Error('Cron must await its work'); } };
@@ -47,13 +47,13 @@ test('root remains side-effect free and original protected routes are preserved'
     assert.equal((await f.context.app.fetch(f.request('POST', '', '/internal/task'), f.env, f.ctx)).status, 403);
     assert.equal(f.calls.length, 0);
 });
-test('timer rejects bad method, missing/wrong/short secret before side effects', async () => {
+test('timer rejects bad method, missing/wrong token before side effects', async () => {
     const f = fixture();
     assert.equal((await f.context.app.fetch(f.request('GET'), f.env, f.ctx)).status, 405);
     for (const token of ['', 'wrong', 's'.repeat(31)]) {
         assert.equal((await f.context.app.fetch(f.request('POST', token), f.env, f.ctx)).status, 403);
     }
-    f.env.CRON_SECRET = 'short';
+    f.env.BOT_TOKEN = '';
     assert.equal((await f.context.app.fetch(f.request('POST'), f.env, f.ctx)).status, 403);
     assert.equal(f.calls.length, 0);
     assert.equal(f.writes.length, 0);
@@ -61,7 +61,7 @@ test('timer rejects bad method, missing/wrong/short secret before side effects',
 test('timer validates configuration and suppresses exception details', async () => {
     const f = fixture();
     delete f.env.BOT_TOKEN;
-    assert.equal((await f.context.app.fetch(f.request(), f.env, f.ctx)).status, 503);
+    assert.equal((await f.context.app.fetch(f.request(), f.env, f.ctx)).status, 403);
     f.env.BOT_TOKEN = '123:dummy';
     f.env.GLADOS_DB.get = async () => { throw new Error('SECRET-cookie'); };
     const result = await f.context.app.fetch(f.request(), f.env, f.ctx);

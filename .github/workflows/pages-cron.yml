@@ -10,21 +10,33 @@ concurrency:
   cancel-in-progress: false
 jobs:
   tick:
-    if: ${{ vars.DEPLOY_TARGET == 'pages' }}
+    if: ${{ vars.PAGES_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Trigger authenticated Pages timer
         env:
           PAGES_URL: ${{ vars.PAGES_URL }}
-          CRON_SECRET: ${{ secrets.PAGES_CRON_SECRET }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$PAGES_URL" =~ ^https://[^/?#]+/?$ ]] || [[ ${#CRON_SECRET} -lt 32 ]]; then
-            printf '%s\n' 'Configure PAGES_URL (HTTPS origin) and PAGES_CRON_SECRET (at least 32 characters).'
+          if [[ ! "$PAGES_URL" =~ ^https://[^/?#]+/?$ ]] || [[ -z "$BOT_TOKEN" ]]; then
+            printf '%s\n' '请设置 Actions 变量 PAGES_URL 和 Secret BOT_TOKEN（与 Pages 相同）。'
             exit 1
           fi
-          curl --silent --show-error --fail-with-body --connect-timeout 15 --max-time 780 \
-            --request POST --header "Authorization: Bearer $CRON_SECRET" \
-            "${PAGES_URL%/}/internal/cron"
+          if ! curl --silent --show-error --fail --connect-timeout 15 --max-time 30 "${PAGES_URL%/}/" | python3 -c 'import json,sys; assert json.load(sys.stdin).get("status") == "running"'; then
+            printf '%s\n' 'Pages 尚未运行机器人：构建命令 npm run build:pages，输出目录 pages/dist，重新部署最新提交。'
+            exit 1
+          fi
+          code=$(curl --silent --show-error --connect-timeout 15 --max-time 780 \
+            --output response.json --write-out '%{http_code}' \
+            --request POST --header "Authorization: Bearer $BOT_TOKEN" \
+            "${PAGES_URL%/}/internal/cron")
+          case "$code" in
+            200) python3 -c 'import json; assert json.load(open("response.json")).get("ok") is True';;
+            403) printf '%s\n' 'BOT_TOKEN 不一致，请检查 Pages 和 Actions Secret。'; exit 1;;
+            404|405) printf '%s\n' 'Pages 未部署最新机器人代码，请检查构建命令和输出目录。'; exit 1;;
+            503) printf '%s\n' 'Pages 缺少 GLADOS_DB 绑定或有效 ADMIN_ID。'; exit 1;;
+            *) printf '定时任务失败，HTTP %s，请检查 Pages 日志。\n' "$code"; exit 1;;
+          esac

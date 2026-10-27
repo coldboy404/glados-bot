@@ -34,7 +34,6 @@ Pages 项目 → Settings → Bindings，添加 KV 绑定 **`GLADOS_DB`**，选�
 | `BOT_TOKEN` | Secret | BotFather Token |
 | `ADMIN_ID` | Secret 或 Text | 管理员 Telegram 数字 ID |
 | `WEBHOOK_URL` | Text | `https://你的Pages域名/webhook`，也支持自定义域名 |
-| `CRON_SECRET` | Secret | 自行生成至少 32 字符随机密钥，例如执行 `openssl rand -hex 32` |
 
 修改绑定或变量后重新部署生产环境。不要在预览环境配置同一个生产 Bot Token，以免预览部署抢占 webhook。
 
@@ -44,13 +43,12 @@ Pages 项目 → Settings → Bindings，添加 KV 绑定 **`GLADOS_DB`**，选�
 
 GitHub 仓库 → Settings → Secrets and variables → Actions：
 
-- Variables：`DEPLOY_TARGET` = `pages`
 - Variables：`PAGES_URL` = `https://你的Pages域名`（仅 origin，不加路径）
-- Secrets：`PAGES_CRON_SECRET` = 上面的 `CRON_SECRET`
+- Secrets：`BOT_TOKEN` = 与 Pages 相同的机器人 Token（复用，不需要额外密钥）
 
-部署完成后进入 Actions → **Pages scheduled tasks** → Run workflow，首次运行会注册 Telegram webhook 和命令。以后更换 `BOT_TOKEN`，重新部署后由定时器自动恢复。未设置 `DEPLOY_TARGET=pages` 时，此工作流会跳过，不影响原 Workers 用户。
+部署完成后进入 Actions → **Pages scheduled tasks** → Run workflow，首次运行会注册 Telegram webhook 和命令。以后更换 `BOT_TOKEN`，重新部署后由定时器自动恢复。未设置 `PAGES_URL` 时，此工作流会跳过，不影响原 Workers 用户。
 
-GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时都未触发，会错过当天设置时段。需要更稳定的调度时，可改用自己的定时器每五分钟向同一路径 POST，并发送 `Authorization: Bearer <CRON_SECRET>`，不要同时开启多个定时器。KV 的去重不是原子锁，仓库工作流通过 concurrency 串行执行。超大账号批次仍受 Cloudflare 请求/子请求配额和 HTTP 超时约束，超时不等于后台一定完成，应检查 Telegram 实际结果。
+GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时都未触发，会错过当天设置时段。需要更稳定的调度时，可改用自己的定时器每五分钟向同一路径 POST，并发送 `Authorization: Bearer <BOT_TOKEN>`，不要同时开启多个定时器。KV 的去重不是原子锁，仓库工作流通过 concurrency 串行执行。超大账号批次仍受 Cloudflare 请求/子请求配额和 HTTP 超时约束，超时不等于后台一定完成，应检查 Telegram 实际结果。
 
 **从 Workers 迁移：**在停用旧 Worker 的业务 Cron 后再开启 Pages 定时器，避免重复执行；同一个 Bot 只能有一个 webhook，注册 Pages 地址会将 Telegram 消息切换到 Pages。不要直接删除旧 KV。原 Worker 的 Token 自动恢复 Cron 也应关闭，避免把 webhook 改回旧地址。
 

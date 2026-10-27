@@ -7,7 +7,7 @@ export default {
         if (request.method !== 'POST') {
             return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'POST' } });
         }
-        const secret = String(env.CRON_SECRET || '');
+        const secret = String(env.BOT_TOKEN || '');
         // Hash both sides before comparing: do not expose secret length or early-match timing.
         const provided = request.headers.get('Authorization') || '';
         const [actual, expected] = await Promise.all([
@@ -15,7 +15,7 @@ export default {
         ]);
         let difference = 0;
         for (let i = 0; i < actual.length; i++) difference |= actual.charCodeAt(i) ^ expected.charCodeAt(i);
-        if (secret.length < 32 || difference !== 0) return new Response('Forbidden', { status: 403 });
+        if (!secret || difference !== 0) return new Response('Forbidden', { status: 403 });
         if (!env.GLADOS_DB || !env.BOT_TOKEN || !/^\d+$/.test(String(env.ADMIN_ID || '').trim())) {
             return new Response('Missing required runtime configuration', { status: 503 });
         }
