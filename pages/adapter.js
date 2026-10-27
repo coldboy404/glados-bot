@@ -23,6 +23,15 @@ export default {
             // Await the work, not waitUntil: Pages background tasks have a short lifetime.
             // Reconciliation failure must not prevent the independent daily check-in.
             await reconcileTelegramWebhook(env);
+            const taskKey = 'PAGES_MANUAL_TASK_' + getAdminUserId(env);
+            const pending = await env.GLADOS_DB.get(taskKey);
+            if (pending) {
+                const task = JSON.parse(pending);
+                if (String(task.userId) === getAdminUserId(env) && ['checkin', 'view_all', 'sub_all'].includes(task.type)) {
+                    await executeTask(task, { ...env, PAGES_TASK_RUNNER: true }, url.origin);
+                }
+                await env.GLADOS_DB.delete(taskKey);
+            }
             await handleScheduled(env);
             return Response.json({ ok: true });
         } catch (_) {

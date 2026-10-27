@@ -652,6 +652,20 @@ async function processCronTime(chatId, userId, text, env) {
 
 // ================= 核心：链式引擎驱动 =================
 async function executeTask(task, env, origin) {
+    // Pages webhook background work expires shortly after the HTTP response.
+    // Persist read/check-in batches for the authenticated timer's active request.
+    if (env.CF_PAGES && !env.PAGES_TASK_RUNNER && ['checkin', 'view_all', 'sub_all'].includes(task.type)) {
+        const userId = getAdminUserId(env);
+        if (String(task.userId) !== userId) return;
+        const key = 'PAGES_MANUAL_TASK_' + userId;
+        if (await env.GLADOS_DB.get(key)) {
+            await tgSend(task.chatId, '⏳ 已有批量任务等待处理，请勿重复点击。定时器通常在几分钟内开始执行。', env);
+            return;
+        }
+        await env.GLADOS_DB.put(key, JSON.stringify(task), { expirationTtl: 3600 });
+        await tgSend(task.chatId, '⏳ 批量任务已保存，将由定时器处理（通常几分钟，GitHub 调度可能延迟），完成后发送结果。', env);
+        return;
+    }
     const { type, chatId, userId, startIndex, plan, successList = [], resultList = [] } = task;
     const accounts = await getAccounts(userId, env);
     const pref = await getPref(userId, env);
@@ -851,7 +865,7 @@ async function getAccountDataObj(acc, doCheckin = false) {
     let data = {
         statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙",
         pointsStr: "0", pointChange: "-", pointBalance: "0", timeLeft: "0", planStr: "未知",
-        cookieValid: false, checkinState: "failed"
+        cookieValid: null, checkinState: "failed"
     };
 
     try {
@@ -866,8 +880,10 @@ async function getAccountDataObj(acc, doCheckin = false) {
         const statusLookup = await gladosFetchJson(acc, '/api/user/status');
         const activeAcc = { ...acc, domain: statusLookup.domain };
         const statusRes = statusLookup.data;
-        const trafficRes = (await gladosFetchJson(activeAcc, '/api/user/traffic')).data;
-        const pointsRes = (await gladosFetchJson(activeAcc, '/api/user/points')).data;
+        // Do not spend two more full domain-fallback chains when status already failed.
+        const statusValid = statusRes && statusRes.code === 0 && statusRes.data;
+        const trafficRes = statusValid ? (await gladosFetchJson(activeAcc, '/api/user/traffic')).data : null;
+        const pointsRes = statusValid ? (await gladosFetchJson(activeAcc, '/api/user/points')).data : null;
 
         if (statusRes && statusRes.code === 0 && statusRes.data) {
             data.cookieValid = true;
@@ -923,7 +939,9 @@ async function getAccountDataObj(acc, doCheckin = false) {
                         data.statusMsg = "✅ 签到成功";
                         data.checkinState = "success";
                     } else {
-                        data.statusMsg = `❌ ${rawMess || '签到失败'}`;
+                        data.statusMsg = /automated check.?in detected/i.test(rawMess)
+                            ? '❌ GLaDOS 拒绝自动签到，请在官网重新登录并更新 Cookie'
+                            : `❌ ${rawMess || '签到失败'}`;
                         data.checkinState = "failed";
                     }
                 } else {
@@ -935,7 +953,10 @@ async function getAccountDataObj(acc, doCheckin = false) {
                 data.checkinState = checkedInToday ? "already" : "pending";
             }
         } else {
-            if (statusRes && statusRes.code !== 0) data.statusMsg = "❌ Cookie 失效";
+            if (statusRes && gladosBusinessAuthFailure(statusRes)) {
+                data.cookieValid = false;
+                data.statusMsg = '❌ Cookie 失效，请重新登录并更新完整 Cookie';
+            }
         }
     } catch (e) {
         data.statusMsg = "❌ 运行异常";
@@ -948,7 +969,7 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
     if (!isSingle) str += `〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n[${index}/${total}] `;
     str += `📧 ${maskEmail(acc.email, pref.showEmail)}\n`;
     str += ` ├ 🌐 站点: glados\n`;
-    str += ` ├ 🍪 Cookie: ${data.cookieValid ? '✅ 有效' : '❌ 已失效'}\n`;
+    str += ` ├ 🍪 Cookie: ${data.cookieValid === true ? '✅ 有效' : data.cookieValid === false ? '❌ 已失效' : '⚠️ 未能验证（超时或受限）'}\n`;
     if (includeStatus) str += ` ├ 📝 状态: ${escapeHtml(data.statusMsg)}\n`;
     str += ` ├ 📊 流量: ${data.trafficStr}\n`;
     str += ` ├ ${data.medal} 积分: ${data.pointsStr}\n`;

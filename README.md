@@ -48,6 +48,8 @@ GitHub 仓库 → Settings → Secrets and variables → Actions：
 
 部署完成后进入 Actions → **Pages scheduled tasks** → Run workflow，首次运行会注册 Telegram webhook 和命令。以后更换 `BOT_TOKEN`，重新部署后由定时器自动恢复。未设置 `PAGES_URL` 时，此工作流会跳过，不影响原 Workers 用户。
 
+Pages 的「批量签到 / 查看全部账户 / 提取全部订阅」会先存入 KV，再由同一个 Actions 定时器执行，避免 Telegram webhook 返回后的后台任务寿命限制。点击后通常等待几分钟；可手动运行 **Pages scheduled tasks** 提前触发。任务完成前不要重复点击。大量账号仍可能受 HTTP 超时和 Cloudflare 子请求配额限制；这不是无限时任务队列，中断后重试可能重复查询或签到。
+
 GitHub 定时任务可能延迟，不保证整点或五分钟 SLA；若整小时都未触发，会错过当天设置时段。需要更稳定的调度时，可改用自己的定时器每五分钟向同一路径 POST，并发送 `Authorization: Bearer <BOT_TOKEN>`，不要同时开启多个定时器。KV 的去重不是原子锁，仓库工作流通过 concurrency 串行执行。超大账号批次仍受 Cloudflare 请求/子请求配额和 HTTP 超时约束，超时不等于后台一定完成，应检查 Telegram 实际结果。
 
 **从 Workers 迁移：**在停用旧 Worker 的业务 Cron 后再开启 Pages 定时器，避免重复执行；同一个 Bot 只能有一个 webhook，注册 Pages 地址会将 Telegram 消息切换到 Pages。不要直接删除旧 KV。原 Worker 的 Token 自动恢复 Cron 也应关闭，避免把 webhook 改回旧地址。

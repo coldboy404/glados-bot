@@ -68,6 +68,18 @@ test('timer validates configuration and suppresses exception details', async () 
     assert.equal(result.status, 500);
     assert.ok(!(await result.text()).includes('SECRET'));
 });
+test('Pages manual batch persists then runs within authenticated timer request', async () => {
+    const f = fixture();
+    f.env.CF_PAGES = '1';
+    f.context.tgSend = async () => {};
+    await f.context.executeTask({type:'checkin',userId:'200',chatId:200,startIndex:0}, f.env, 'https://bot.example.com');
+    assert.ok(f.data.has('PAGES_MANUAL_TASK_200'));
+    vm.runInContext(`handleScheduled = async () => {}; globalThis.ran = []; executeTask = async (task, env) => { if (!env.PAGES_TASK_RUNNER) throw Error('background'); ran.push(task.type); };`, f.context);
+    const response = await f.context.app.fetch(f.request(), f.env, f.ctx);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Array.from(f.context.ran), ['checkin']);
+    assert.equal(f.data.has('PAGES_MANUAL_TASK_200'), false);
+});
 test('same token with stale Worker webhook is repaired on Pages migration', async () => {
     const f = fixture();
     await f.context.app.fetch(f.request(), f.env, f.ctx);

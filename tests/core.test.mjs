@@ -33,6 +33,13 @@ test('cookie update requires signature and leaves old cookie intact',async()=>{
  await f.c.processUpdateCookie(1,1,'koa:sess=new',f.env);
  assert.equal(JSON.parse(f.store.get('USER_1'))[0].cookie,'old');assert.match(f.sent.at(-1),/koa:sess.sig/);
 });
+test('status timeout remains unknown and skips traffic and points requests',async()=>{
+ const f=fixture();const paths=[];
+ f.c.gladosFetchJson=async(acc,path)=>{paths.push(path);return {domain:acc.domain,data:null};};
+ const data=await f.c.getAccountDataObj({domain:'glados-facility.com'},false);
+ assert.deepEqual(paths,['/api/user/status']);assert.equal(data.cookieValid,null);
+ assert.match(f.c.formatAccountString({},1,1,{},data),/未能验证/);
+});
 test('successful observation logged is not misclassified as already checked in',async()=>{
  const f=fixture();
  f.c.gladosFetchJson=async(acc,path)=>({domain:acc.domain,data:path.endsWith('checkin')?{code:0,message:'Observation logged'}:path.endsWith('status')?{code:0,data:{leftDays:10,vip:21}}:{code:0,points:10,history:[]}});
