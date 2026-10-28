@@ -9,6 +9,10 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 - **健康监控** — 菜单显示账号状态；Cookie 失效自动标红，签到失败主动推送告警。
 - **Telegram 管理** — 绑定账号、看状态、手动签到，都在对话框完成。
 
+## 订阅格式
+
+单账号和批量提取均返回 **Mihomo / Clash、sing-box、通用 / Shadowrocket** 三种订阅。通用链接为官网的 Servers only 节点订阅，不包含完整分流配置。sing-box 使用官网独立的 `hashed` 参数，要求核心版本 ≥ 1.14.0；若官网未返回某种格式所需参数，机器人会单独提示，其他可用链接仍正常显示。
+
 ## Workers 自动部署（推荐）
 
 推送 `main` 会运行 **Deploy Worker**：先测试，再部署 `wrangler.toml` 中的 `glados-bot`，保留 Dashboard 变量。GitHub Actions Secrets 需要 `CLOUDFLARE_API_TOKEN`（仅目标账户的 Workers Scripts 编辑、Workers KV 读取、账户设置读取权限）和 `CLOUDFLARE_ACCOUNT_ID`。不要将临时 OAuth 登录凭据作为长期 CI Token。缺少凭据时部署 job 会跳过并在 Summary 明示，不代表已经发布。

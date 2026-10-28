@@ -709,20 +709,19 @@ async function executeTask(task, env, origin) {
             }
         }
         else if (type === 'sub_all') {
-            const link = await getSubAndHost(acc.domain, acc.cookie, true);
-            if (link && !link.includes('xxxx')) {
-                msgs.push(`<b>${i+1}. ${maskEmail(acc.email, pref.showEmail)}</b>\n<code>${link}</code>\n`);
-            } else if (link && link.includes('xxxx')) {
-                msgs.push(`<b>${i+1}. ${maskEmail(acc.email, pref.showEmail)}</b>\n❌ 提取失败：该账号订阅码被隐藏 (xxxx)\n`);
-            } else {
-                msgs.push(`<b>${i+1}. ${maskEmail(acc.email, pref.showEmail)}</b>\n❌ 提取失败：网络异常或账号受限\n`);
-            }
+            const subscription = await getSubAndHost(acc.domain, acc.cookie);
+            msgs.push(`<b>${i+1}. ${escapeHtml(maskEmail(acc.email, pref.showEmail))}</b>\n${subscription}\n`);
         }
         await new Promise(r => setTimeout(r, 600));
     }
 
     if (type !== 'checkin' && (type === 'view_all' || type === 'sub_all') && msgs.length > 0 && chatId) {
-        await tgSend(chatId, msgs.join("\n"), env);
+        // Three subscription URLs per account can exceed Telegram's message limit in a batch.
+        if (type === 'sub_all') {
+            for (const message of msgs) await tgSend(chatId, message, env);
+        } else {
+            await tgSend(chatId, msgs.join("\n"), env);
+        }
     }
 
     if (type === 'batch_exchange' && msgs.length && chatId) await tgSend(chatId, msgs.join('\n'), env);
@@ -813,10 +812,37 @@ async function safeFetchJson(url, options) {
     } catch (e) { return null; }
 }
 
-// 获取纯净版 Clash 订阅配置 (包含 302 拦截防丢策略与原生解析)
+// URL templates verified against the official console subscription bundle.
+function subscriptionLinksFromStatus(data = {}) {
+    const subscriptions = data.subscriptions || {};
+    const id = data.configureId || data.user_id || data.userId;
+    const code = data.code, port = data.port, hashed = data.hashed;
+    const part = value => encodeURIComponent(String(value));
+    const base = 'https://update.glados-config.com';
+    const valid = value => {
+        try { return typeof value === 'string' && new URL(value).protocol === 'https:' && !value.includes('xxxx') ? value : null; }
+        catch (_) { return null; }
+    };
+    const credentials = id && code && port && ![id, code, port].some(value => String(value).includes('xxxx'));
+    const hashCredentials = id && hashed && ![id, hashed].some(value => String(value).includes('xxxx'));
+    return {
+        mihomo: valid(subscriptions.mihomo) || valid(subscriptions.clash) || (credentials ? `${base}/mihomo/${part(id)}/${part(code)}/${part(port)}/glados.yaml` : null),
+        singbox: valid(subscriptions.singbox) || valid(subscriptions['sing-box']) || (hashCredentials ? `${base}/singbox/${part(id)}/${part(hashed)}` : null),
+        shadowrocket: valid(subscriptions.shadowrocket) || (credentials ? `${base}/subscribe/${part(id)}/${part(code)}/${part(port)}/servers` : null)
+    };
+}
+
+function formatSubscriptionLinks(links) {
+    return [['mihomo', 'Mihomo / Clash'], ['singbox', 'sing-box'], ['shadowrocket', '通用 / Shadowrocket']]
+        .map(([key, label]) => `<b>${label} 订阅：</b>\n${links[key] ? `<code>${escapeHtml(links[key])}</code>` : '⚠️ 官网接口未返回所需参数，无法提取'}`)
+        .join('\n\n') + '\n\nℹ️ sing-box 订阅要求核心版本 ≥ 1.14.0。';
+}
+
+// 获取官网订阅配置，保留 Mihomo 重定向与多域名回退。
 async function getSubAndHost(domain, cookie, returnRaw = false) {
     try {
         let subLink = null;
+        const links = { mihomo: null, singbox: null, shadowrocket: null };
         let activeDomain = domain;
         let statusAvailable = false;
         const candidateDomains = GLADOS_DOMAINS.includes(domain) ? [domain].concat(GLADOS_DOMAINS.filter(function(d) { return d !== domain; })) : [domain];
@@ -832,24 +858,24 @@ async function getSubAndHost(domain, cookie, returnRaw = false) {
                 }
             } catch(e) {}
 
-            // 2. 若没有重定向，回退 status 接口解析
-            if (!subLink) {
+            // Status supplies the independent hashed credential used by sing-box.
+            // Never derive it by replacing the Mihomo URL path.
+            if (!returnRaw || !subLink) {
                 const statusRes = await safeFetchJson(`https://${candidate}/api/user/status`, reqOpts);
                 if (statusRes && statusRes.code === 0 && statusRes.data) {
                     statusAvailable = true;
-                    if (statusRes.data.subscriptions?.mihomo) subLink = statusRes.data.subscriptions.mihomo;
-                    else if (statusRes.data.subscriptions?.clash) subLink = statusRes.data.subscriptions.clash;
-                    else {
-                        const userId = statusRes.data.userId || statusRes.data.configureId;
-                        const code = statusRes.data.code;
-                        const port = statusRes.data.port;
-                        if (userId && code && port) subLink = `https://update.glados-config.com/mihomo/${userId}/${code}/${port}/glados.yaml`;
-                    }
+                    const extracted = subscriptionLinksFromStatus(statusRes.data);
+                    for (const key of Object.keys(links)) if (!links[key] && extracted[key]) links[key] = extracted[key];
+                    if (!subLink) subLink = links.mihomo;
                 }
             }
-            if (subLink) break;
+            if (subLink && !subLink.includes('xxxx') && !links.mihomo) links.mihomo = subLink;
+            if (returnRaw ? subLink : (links.mihomo && links.singbox && links.shadowrocket)) break;
+            // Readable status without subscription parameters is not a network failure.
+            if (statusAvailable) break;
         }
 
+        if (!returnRaw && Object.values(links).some(Boolean)) return `<b>✅ 订阅配置</b>\n\n${formatSubscriptionLinks(links)}`;
         if (!subLink) return returnRaw ? null : (statusAvailable
             ? '❌ 账号状态可读取，但接口未返回可用的 Mihomo / Clash 订阅地址。请在官网订阅页面确认；不能据此判定 Cookie 失效。'
             : '❌ 未取得可用的账号状态或订阅地址，可能是接口超时、访问受限或登录失效，当前无法区分。');
