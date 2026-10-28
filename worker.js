@@ -781,7 +781,8 @@ async function handleScheduled(env) {
 
     const now = getBeijingDateParts();
     const pref = await getPref(userId, env);
-    if (now.hour !== pref.checkinHour) return;
+    // GitHub schedules can be delayed: catch up later the same day, once only.
+    if (now.hour < pref.checkinHour) return;
     if (!await claimScheduledCheckin(userId, now.date, env)) return;
 
     const accounts = await getAccounts(userId, env);

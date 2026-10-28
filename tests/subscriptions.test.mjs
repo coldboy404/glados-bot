@@ -40,3 +40,15 @@ test('batch subscription delivery uses same multi-format renderer',async()=>{
  await c.executeTask({type:'sub_all',chatId:1,userId:1,startIndex:0},{},'https://example.com');
  assert.match(sent[0],/singbox\/id\/hash/);assert.match(sent[0],/subscribe\/id\/code\/123\/servers/);
 });
+test('delayed scheduler catches up once per day and never before configured hour',async()=>{
+ const c=fixture(),store=new Map();let calls=0,sends=0,hour=11;
+ const env={ADMIN_ID:'1',GLADOS_DB:{get:async k=>store.get(k)||null,put:async(k,v)=>store.set(k,v)}};
+ c.getBeijingDateParts=()=>({date:'2026-10-28',hour});
+ c.getPref=async()=>({checkinHour:12});
+ c.getAccounts=async()=>[{domain:'glados-facility.com',email:'x@example.com'}];
+ c.getAccountDataObj=async()=>{calls++;return {checkinState:'success',statusMsg:'ok'};};
+ c.tgSendResultList=async()=>{sends++;};
+ await c.handleScheduled(env);assert.equal(calls,0);
+ hour=14;await c.handleScheduled(env);assert.equal(calls,1);assert.equal(sends,1);
+ hour=20;await c.handleScheduled(env);assert.equal(calls,1);assert.equal(sends,1);
+});
