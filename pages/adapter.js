@@ -19,24 +19,47 @@ export default {
         if (!env.GLADOS_DB || !env.BOT_TOKEN || !/^\d+$/.test(String(env.ADMIN_ID || '').trim())) {
             return new Response('Missing required runtime configuration', { status: 503 });
         }
+        // Await the work, not waitUntil: Pages background tasks have a short lifetime.
+        // The three phases are isolated on purpose. Webhook reconciliation and
+        // a queued manual task are maintenance; neither may abort the daily
+        // check-in, which is the whole point of this tick. Previously any
+        // reconciliation error (or one permanently failing manual task)
+        // failed the request before handleScheduled ever ran.
+        const result = { ok: true, taskProcessed: false, webhookOk: null, scheduled: 'not-run', version: 'pages-delivery-diagnostics-v2' };
         try {
-            // Await the work, not waitUntil: Pages background tasks have a short lifetime.
-            // Reconciliation failure must not prevent the independent daily check-in.
             await reconcileTelegramWebhook(env);
+            result.webhookOk = true;
+        } catch (e) {
+            result.webhookOk = false;
+            // No exception text here: upstream errors must never reach logs
+            // or responses with a Cookie or Bot Token embedded in them.
+            console.log('Webhook reconciliation failed; continuing with scheduled work');
+        }
+        try {
             const taskKey = 'PAGES_MANUAL_TASK_' + getAdminUserId(env);
             const pending = await env.GLADOS_DB.get(taskKey);
             if (pending) {
+                // Consume before running: a task that throws must neither be
+                // retried forever nor block the scheduled check-in below.
+                await env.GLADOS_DB.delete(taskKey);
+                result.taskProcessed = true;
                 const task = JSON.parse(pending);
                 if (String(task.userId) === getAdminUserId(env) && ['checkin', 'view_all', 'sub_all'].includes(task.type)) {
                     await executeTask(task, { ...env, PAGES_TASK_RUNNER: true }, url.origin);
                 }
-                await env.GLADOS_DB.delete(taskKey);
             }
-            await handleScheduled(env);
-            return Response.json({ ok: true, taskProcessed: Boolean(pending), version: 'pages-delivery-diagnostics-v1' });
+        } catch (e) {
+            result.taskError = true;
+            console.log('Pages manual task failed; continuing with scheduled work');
+        }
+        try {
+            result.scheduled = await handleScheduled(env);
         } catch (_) {
             // Never return an upstream exception that might contain a Cookie or Bot Token.
-            return Response.json({ ok: false, error: 'Scheduled task failed' }, { status: 500 });
+            // The scheduled handler has already released its daily claim, so
+            // the caller's retry (or the next tick) can still finish the day.
+            return Response.json({ ...result, ok: false, error: 'Scheduled task failed' }, { status: 500 });
         }
+        return Response.json(result);
     }
 };

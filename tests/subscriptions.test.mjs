@@ -40,6 +40,52 @@ test('batch subscription delivery uses same multi-format renderer',async()=>{
  await c.executeTask({type:'sub_all',chatId:1,userId:1,startIndex:0},{},'https://example.com');
  assert.match(sent[0],/singbox\/id\/hash/);assert.match(sent[0],/subscribe\/id\/code\/123\/servers/);
 });
+test('crashed scheduled attempt releases the daily claim for a same-day retry',async()=>{
+ const c=fixture(),store=new Map();let calls=0;
+ const env={ADMIN_ID:'1',GLADOS_DB:{get:async k=>store.get(k)||null,put:async(k,v)=>store.set(k,v),delete:async k=>store.delete(k)}};
+ c.getBeijingDateParts=()=>({date:'2026-10-28',hour:13});
+ c.getPref=async()=>({checkinHour:12});
+ c.getAccounts=async()=>[{domain:'glados-facility.com',email:'x@example.com'}];
+ c.getAccountDataObj=async()=>{calls++;if(calls===1)throw new Error('boom');return {checkinState:'success',statusMsg:'ok',cookieValid:true};};
+ c.tgSendResultList=async()=>{};
+ await assert.rejects(c.handleScheduled(env));
+ assert.equal(store.has('SCHEDULED_CHECKIN_1_2026-10-28'),false);
+ await c.handleScheduled(env);assert.equal(calls,2);
+ await c.handleScheduled(env);assert.equal(calls,2);
+});
+test('transient upstream failure neither poisons health nor burns the day',async()=>{
+ const c=fixture(),store=new Map();let calls=0,sends=0;
+ const env={ADMIN_ID:'1',GLADOS_DB:{get:async k=>store.get(k)||null,put:async(k,v)=>store.set(k,v),delete:async k=>store.delete(k)}};
+ c.getBeijingDateParts=()=>({date:'2026-10-28',hour:13});
+ c.getPref=async()=>({checkinHour:12});
+ c.getAccounts=async()=>[{domain:'glados-facility.com',email:'x@example.com'}];
+ c.getAccountDataObj=async()=>{calls++;return calls===1?{checkinState:'failed',statusMsg:'timeout',transientFailure:true,cookieValid:null}:{checkinState:'success',statusMsg:'ok',cookieValid:true};};
+ c.tgSendResultList=async()=>{sends++;};
+ const first=await c.handleScheduled(env);
+ assert.equal(first,'retry-later');assert.equal(sends,0);
+ assert.equal(JSON.parse(store.get('USER_1'))[0].cronSuccess,undefined);
+ assert.equal(store.has('SCHEDULED_CHECKIN_1_2026-10-28'),false);
+ const second=await c.handleScheduled(env);
+ assert.equal(second,'done');assert.equal(calls,2);assert.equal(sends,1);
+ assert.equal(JSON.parse(store.get('USER_1'))[0].cronSuccess,true);
+ assert.equal(JSON.parse(store.get('USER_1'))[0].cookieValid,true);
+});
+test('stale in-progress claim is taken over, fresh claim still blocks',async()=>{
+ const c=fixture(),store=new Map();let calls=0;
+ const env={ADMIN_ID:'1',GLADOS_DB:{get:async k=>store.get(k)||null,put:async(k,v)=>store.set(k,v),delete:async k=>store.delete(k)}};
+ c.getBeijingDateParts=()=>({date:'2026-10-28',hour:13});
+ c.getPref=async()=>({checkinHour:12});
+ c.getAccounts=async()=>[{domain:'glados-facility.com',email:'x@example.com'}];
+ c.getAccountDataObj=async()=>{calls++;return {checkinState:'success',statusMsg:'ok',cookieValid:true};};
+ c.tgSendResultList=async()=>{};
+ store.set('SCHEDULED_CHECKIN_1_2026-10-28',JSON.stringify({state:'started',at:Date.now(),attempts:1}));
+ await c.handleScheduled(env);assert.equal(calls,0);
+ store.set('SCHEDULED_CHECKIN_1_2026-10-28',JSON.stringify({state:'started',at:Date.now()-11*60*1000,attempts:1}));
+ await c.handleScheduled(env);assert.equal(calls,1);
+ // Legacy plain 'started' values from the old claim-first code are stale too.
+ store.set('SCHEDULED_CHECKIN_1_2026-10-28','started');
+ await c.handleScheduled(env);assert.equal(calls,2);
+});
 test('delayed scheduler catches up once per day and never before configured hour',async()=>{
  const c=fixture(),store=new Map();let calls=0,sends=0,hour=11;
  const env={ADMIN_ID:'1',GLADOS_DB:{get:async k=>store.get(k)||null,put:async(k,v)=>store.set(k,v)}};

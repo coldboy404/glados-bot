@@ -98,15 +98,37 @@ test('same token with stale Worker webhook is repaired on Pages migration', asyn
     const registration = f.calls.find(c => c.url.endsWith('/setWebhook'));
     assert.equal(JSON.parse(registration.body).url, f.env.WEBHOOK_URL);
 });
-test('registration failure and missing URL cannot report timer success', async () => {
+test('webhook registration failure no longer blocks the scheduled check-in', async () => {
     for (const missingUrl of [true, false]) {
         const f = fixture();
         if (missingUrl) delete f.env.WEBHOOK_URL;
         else f.context.fetch = async () => Response.json({ok: false, description: 'Unauthorized'});
+        vm.runInContext(`getBeijingDateParts = () => ({date: '2026-10-27', hour: 12});`, f.context);
         const response = await f.context.app.fetch(f.request(), f.env, f.ctx);
-        assert.equal(response.status, 500);
+        assert.equal(response.status, 200);
+        const body = await response.json();
+        assert.equal(body.ok, true);
+        assert.equal(body.webhookOk, false);
+        assert.equal(body.scheduled, 'done');
         assert.equal(f.data.has('SYSTEM_BOT_TOKEN_FINGERPRINT'), false);
     }
+});
+test('a failing manual task is consumed once and cannot block the scheduled check-in', async () => {
+    const f = fixture();
+    f.data.set('PAGES_MANUAL_TASK_200', JSON.stringify({type: 'checkin', userId: '200', chatId: 200}));
+    vm.runInContext(`
+        executeTask = async () => { throw new Error('task boom'); };
+        globalThis.scheduledRuns = 0;
+        handleScheduled = async () => { scheduledRuns++; return 'done'; };
+    `, f.context);
+    const response = await f.context.app.fetch(f.request(), f.env, f.ctx);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.taskProcessed, true);
+    assert.equal(body.taskError, true);
+    assert.equal(body.scheduled, 'done');
+    assert.equal(f.context.scheduledRuns, 1);
+    assert.equal(f.data.has('PAGES_MANUAL_TASK_200'), false);
 });
 test('timer reconciles token only once and checks only current admin once per day', async () => {
     const f = fixture();

@@ -73,6 +73,43 @@ test('status timeout remains unknown and skips traffic and points requests',asyn
  assert.deepEqual(paths,['/api/user/status']);assert.equal(data.cookieValid,null);
  assert.match(f.c.formatAccountString({},1,1,{},data),/未能验证/);
 });
+test('checkin success is not rewritten as failure when the status lookup fails',async()=>{
+ const f=fixture();
+ f.c.gladosFetchJson=async(acc,path)=>({domain:acc.domain,data:path.endsWith('checkin')?{code:0,message:'Observation logged'}:null});
+ const data=await f.c.getAccountDataObj({domain:'glados-facility.com',cookie:'dummy'},true);
+ assert.equal(data.checkinState,'success');
+ assert.equal(data.cookieValid,null);
+ assert.equal(data.transientFailure,false);
+});
+test('device mismatch retries checkin with the login platform UA and remembers it',async()=>{
+ const f=fixture(); const uas=[];
+ f.c.gladosFetchJson=async(acc,path,opts)=>{
+  if(path.endsWith('checkin')){uas.push((opts&&opts.headers&&opts.headers['User-Agent'])||'default');return {domain:acc.domain,data:uas.length===1?{code:4,reason:'device-mismatch',loginDevice:'Android',message:'device mismatch'}:{code:0,message:'Observation logged'}};}
+  if(path.endsWith('status'))return {domain:acc.domain,data:{code:0,data:{leftDays:3,vip:21}}};
+  return {domain:acc.domain,data:{code:0,points:5,history:[]}};
+ };
+ const data=await f.c.getAccountDataObj({domain:'glados-facility.com',cookie:'dummy'},true);
+ assert.equal(data.checkinState,'success');
+ assert.equal(uas.length,2);assert.match(uas[1],/Android/);
+ assert.match(data.checkinUa,/Android/);
+});
+test('auth classification only reads the message, not unrelated payload fields',()=>{
+ const f=fixture();
+ assert.equal(f.c.gladosBusinessAuthFailure({code:0,message:'Check in success',data:{note:'trial expired yesterday'}}),false);
+ assert.equal(f.c.gladosBusinessAuthFailure({code:0,message:'没有权限'}),true);
+ assert.equal(f.c.gladosBusinessAuthFailure({code:-2,message:'whatever'}),true);
+});
+test('health summary counts cookie validity, not the last cron outcome',async()=>{
+ const f=fixture();
+ f.store.set('USER_1',JSON.stringify([{domain:'glados-facility.com',email:'a@example.com',cronSuccess:false,cookieValid:true},{domain:'glados-facility.com',email:'b@example.com',cookieValid:false}]));
+ const summary=await f.c.getHealthSummary('1',f.env);
+ assert.match(summary,/1\/2 正常，1 个 Cookie 失效/);
+ assert.match(summary,/上次定时签到有 1 个账号未成功/);
+ f.store.set('USER_1',JSON.stringify([{domain:'glados-facility.com',cronSuccess:false},{domain:'glados-facility.com',cronSuccess:false}]));
+ const legacy=await f.c.getHealthSummary('1',f.env);
+ assert.match(legacy,/🟢 GLaDOS 2 个账号已绑定/);
+ assert.ok(!legacy.includes('0/2 正常'));
+});
 test('successful observation logged is not misclassified as already checked in',async()=>{
  const f=fixture();
  f.c.gladosFetchJson=async(acc,path)=>({domain:acc.domain,data:path.endsWith('checkin')?{code:0,message:'Observation logged'}:path.endsWith('status')?{code:0,data:{leftDays:10,vip:21}}:{code:0,points:10,history:[]}});

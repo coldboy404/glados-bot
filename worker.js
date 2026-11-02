@@ -14,6 +14,32 @@ const HEADERS = {
     'Accept': 'application/json, text/plain, */*'
 };
 
+// GLaDOS check-in is tied to the platform used at login (code 4,
+// reason "device-mismatch", field loginDevice). A cookie created on a
+// phone or a Mac stays perfectly valid for status/info queries, yet every
+// check-in is rejected until the request carries a UA of that platform.
+const PLATFORM_USER_AGENTS = {
+    Windows: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    macOS: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    Linux: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    iPhone: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+    iPad: 'Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+    Android: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
+};
+
+function platformUserAgent(device) {
+    const name = String(device || '').trim();
+    if (!name) return null;
+    if (PLATFORM_USER_AGENTS[name]) return PLATFORM_USER_AGENTS[name];
+    const lower = name.toLowerCase();
+    for (const key of Object.keys(PLATFORM_USER_AGENTS)) {
+        if (lower.includes(key.toLowerCase())) return PLATFORM_USER_AGENTS[key];
+    }
+    if (lower.includes('mac')) return PLATFORM_USER_AGENTS.macOS;
+    if (lower.includes('ios')) return PLATFORM_USER_AGENTS.iPhone;
+    return null;
+}
+
 function isGladosAccount(acc) { return acc && GLADOS_DOMAINS.includes(acc.domain); }
 
 function normalizeCookie(raw) {
@@ -67,8 +93,13 @@ function gladosRequestDomains(acc) {
 function gladosBusinessAuthFailure(result) {
     if (!result || typeof result !== 'object') return true;
     const code = result.code;
-    const text = JSON.stringify(result).toLowerCase();
-    return code === -2 || code === -401 || code === 401 || /not\s*logged?\s*in|not.?login|unauthorized|permission|expired|登录|过期|无权限|未授权/.test(text);
+    if (code === -2 || code === -401 || code === 401) return true;
+    // Only the human-readable message may signal an auth failure. Scanning
+    // the whole JSON used to misclassify successful payloads that merely
+    // contain words such as "expired" in unrelated fields; the fallback
+    // chain then burned every domain and ended as a bogus request timeout.
+    const text = String(result.message || result.msg || '').toLowerCase();
+    return /not\s*logged?\s*in|not.?login|unauthorized|permission|expired|登录|过期|无权限|未授权|没有权限/.test(text);
 }
 
 function gladosCheckinSucceeded(result) {
@@ -80,8 +111,15 @@ function gladosCheckinSucceeded(result) {
 }
 
 async function gladosFetchJson(acc, path, options) {
-    const opts = options || {};
-    for (const domain of gladosRequestDomains(acc)) {
+    const { preferredDomain, ...opts } = options || {};
+    const domains = gladosRequestDomains(acc);
+    // A domain that just answered for this account goes first, so a dead
+    // preferred domain does not cost a full fallback chain per endpoint.
+    if (preferredDomain && GLADOS_DOMAINS.includes(preferredDomain)) {
+        const at = domains.indexOf(preferredDomain);
+        if (at > 0) { domains.splice(at, 1); domains.unshift(preferredDomain); }
+    }
+    for (const domain of domains) {
         const requestBody = path.endsWith('/checkin') ? JSON.stringify({ token: domain }) : opts.body;
         const result = await safeFetchJson('https://' + domain + path, {
             ...opts,
@@ -104,12 +142,21 @@ async function getHealthSummary(userId, env) {
     const lines = [];
     const accts = await getAccounts(userId, env);
     if (accts.length > 0) {
-        const ok = accts.filter(function(a){ return a.cronSuccess !== false; }).length;
-        const bad = accts.filter(function(a){ return a.cronSuccess === false; }).length;
-        if (bad > 0) {
-            lines.push('🟡 GLaDOS ' + ok + '/' + accts.length + ' 正常，' + bad + ' 失败');
+        // Account health means Cookie validity, not the outcome of the last
+        // scheduled check-in. cronSuccess used to be the only signal, so one
+        // transient upstream failure marked every still-valid account as
+        // failed (0/N 正常，N 失败) until the next successful cron run, and
+        // even a successful manual check-in could not clear the label.
+        const invalid = accts.filter(function(a){ return a.cookieValid === false; }).length;
+        const ok = accts.length - invalid;
+        if (invalid > 0) {
+            lines.push('🔴 GLaDOS ' + ok + '/' + accts.length + ' 正常，' + invalid + ' 个 Cookie 失效');
         } else {
             lines.push('🟢 GLaDOS ' + accts.length + ' 个账号已绑定');
+        }
+        const checkinFailed = accts.filter(function(a){ return a.cookieValid !== false && a.cronSuccess === false; }).length;
+        if (checkinFailed > 0) {
+            lines.push('🟡 上次定时签到有 ' + checkinFailed + ' 个账号未成功（Cookie 未判失效，可手动签到或等待自动重试）');
         }
     } else {
         lines.push('⚪ GLaDOS 未绑定账号');
@@ -473,6 +520,7 @@ async function handleCallback(callbackQuery, env, origin) {
         await rp("⏳ 正在拉取该账号信息...");
         const pref = await getPref(userId, env);
         const accData = await getAccountDataObj(acc, false);
+        if (applyAccountRuntimeState(acc, accData, false)) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
         await rp(msgStr);
     }
@@ -485,6 +533,7 @@ async function handleCallback(callbackQuery, env, origin) {
         
         await rp("⏳ 正在为您单独执行签到，请稍候...");
         const accData = await getAccountDataObj(acc, true); // true 代表触发签到
+        if (applyAccountRuntimeState(acc, accData, true)) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
         await rp(msgStr);
     }
@@ -627,11 +676,18 @@ async function processUpdateCookie(chatId, userId, text, env) {
     }
     account.cookie = newCookie;
     account.domain = GLADOS_DOMAIN;
+    // A new cookie is a new login: drop the old cookie's health verdict and
+    // remembered check-in UA until the verification below re-proves them.
+    delete account.cookieValid;
+    delete account.cronSuccess;
+    delete account.cronMsg;
+    delete account.checkinUa;
     await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     
     await rp("✅ Cookie 更新成功！正在为您验证签到状态...");
     const pref = await getPref(userId, env);
     const data = await getAccountDataObj(accounts[index], true);
+    if (applyAccountRuntimeState(accounts[index], data, true)) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     const msgStr = formatAccountString(accounts[index], index + 1, accounts.length, pref, data, true, true);
     await rp(msgStr, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
 }
@@ -674,6 +730,7 @@ async function executeTask(task, env, origin) {
     let msgs = [];
     let newSuccessList = [...successList];
     let newResultList = [...resultList];
+    let accountsDirty = false;
 
     for (let i = startIndex; i < endIndex; i++) {
         const acc = accounts[i];
@@ -681,6 +738,10 @@ async function executeTask(task, env, origin) {
         if (type === 'checkin' || type === 'view_all') {
             const doCheckin = (type === 'checkin');
             const data = await getAccountDataObj(acc, doCheckin);
+            // Manual runs teach the same facts as the cron run (cookie
+            // validity, working check-in UA, last check-in outcome), so a
+            // successful manual check-in also clears a stale failure label.
+            if (applyAccountRuntimeState(acc, data, doCheckin)) accountsDirty = true;
             const gladosMsg = type === 'checkin'
                 ? formatCheckinResultRow(acc, i + 1, pref, data)
                 : formatAccountString(acc, i + 1, accounts.length, pref, data, true, false);
@@ -725,6 +786,7 @@ async function executeTask(task, env, origin) {
     }
 
     if (type === 'batch_exchange' && msgs.length && chatId) await tgSend(chatId, msgs.join('\n'), env);
+    if (accountsDirty) await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
     if (endIndex < accounts.length) {
         await executeTask({ type, chatId, userId, startIndex: endIndex, plan, successList: newSuccessList, resultList: newResultList }, env, origin);
     } else {
@@ -765,39 +827,108 @@ function getBeijingDateParts(now = new Date()) {
     return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
 }
 
+// Persist what a live query just proved about an account, so the menu's
+// health line and the next check-in start from facts instead of stale flags.
+// Transient failures never overwrite a previously proven state.
+function applyAccountRuntimeState(acc, data, updateCheckinState) {
+    let changed = false;
+    if (data.cookieValid === true || data.cookieValid === false) {
+        if (acc.cookieValid !== data.cookieValid) { acc.cookieValid = data.cookieValid; changed = true; }
+    }
+    if (data.checkinUa && acc.checkinUa !== data.checkinUa) { acc.checkinUa = data.checkinUa; changed = true; }
+    if (updateCheckinState && !data.transientFailure) {
+        const ok = data.checkinState !== 'failed';
+        if (acc.cronSuccess !== ok) { acc.cronSuccess = ok; changed = true; }
+        if (acc.cronMsg !== data.statusMsg) { acc.cronMsg = data.statusMsg; changed = true; }
+    }
+    return changed;
+}
+
+// The daily claim is a small state machine, not a one-way flag:
+// - "done" blocks re-runs for the rest of the Beijing day.
+// - "started" younger than the stale window means another tick is working.
+// - "started" older than that (including the legacy plain 'started' value
+//   written by the old code) belongs to an attempt that died mid-run; the
+//   next tick takes it over. The old code claimed before doing any work and
+//   never released, so a single failed attempt silently lost the whole day.
+const SCHEDULED_CLAIM_STALE_MS = 10 * 60 * 1000;
+
 async function claimScheduledCheckin(userId, date, env) {
     const key = `SCHEDULED_CHECKIN_${userId}_${date}`;
-    if (await env.GLADOS_DB.get(key)) return false;
-    // 先记录当天执行权，避免 Cloudflare Cron 重投或旧 ADMIN_ID 数据导致重复签到。
-    await env.GLADOS_DB.put(key, 'started', { expirationTtl: 172800 });
-    return true;
+    const raw = await env.GLADOS_DB.get(key);
+    let previousAttempts = 0;
+    if (raw) {
+        let claim = null;
+        try { claim = JSON.parse(raw); } catch (_) {}
+        if (claim && claim.state === 'done') return null;
+        if (claim && claim.state === 'started' && Date.now() - Number(claim.at || 0) < SCHEDULED_CLAIM_STALE_MS) return null;
+        previousAttempts = claim && Number.isInteger(claim.attempts) ? claim.attempts : 1;
+    }
+    const claim = { key, attempts: previousAttempts + 1 };
+    await env.GLADOS_DB.put(key, JSON.stringify({ state: 'started', at: Date.now(), attempts: claim.attempts }), { expirationTtl: 172800 });
+    return claim;
+}
+
+async function finishScheduledCheckin(claim, env) {
+    await env.GLADOS_DB.put(claim.key, JSON.stringify({ state: 'done', at: Date.now(), attempts: claim.attempts }), { expirationTtl: 172800 });
+}
+
+async function releaseScheduledCheckin(claim, env) {
+    try { if (env.GLADOS_DB.delete) await env.GLADOS_DB.delete(claim.key); } catch (_) {}
 }
 
 async function handleScheduled(env) {
     // 本 Bot 是单管理员设计：ADMIN_ID 变更后，只能给当前管理员执行/推送，
     // 绝不再遍历历史 ALL_USERS 中残留的旧管理员。
     const userId = getAdminUserId(env);
-    if (!userId || !env.GLADOS_DB) return;
+    if (!userId || !env.GLADOS_DB) return 'no-admin';
 
     const now = getBeijingDateParts();
     const pref = await getPref(userId, env);
     // GitHub schedules can be delayed: catch up later the same day, once only.
-    if (now.hour < pref.checkinHour) return;
-    if (!await claimScheduledCheckin(userId, now.date, env)) return;
+    if (now.hour < pref.checkinHour) return 'not-due';
+    const claim = await claimScheduledCheckin(userId, now.date, env);
+    if (!claim) return 'already-handled';
 
-    const accounts = await getAccounts(userId, env);
-    const resultRows = [];
-    for (let i = 0; i < accounts.length; i++) {
-        const acc = accounts[i];
-        const data = await getAccountDataObj(acc, true);
-        acc.domain = GLADOS_DOMAIN;
-        acc.cronSuccess = data.checkinState !== 'failed';
-        acc.cronMsg = data.statusMsg;
-        resultRows.push(formatCheckinResultRow(acc, i + 1, pref, data));
-        await new Promise(function(resolve) { setTimeout(resolve, 600); });
+    try {
+        const accounts = await getAccounts(userId, env);
+        const resultRows = [];
+        let transientFailures = 0;
+        for (let i = 0; i < accounts.length; i++) {
+            const acc = accounts[i];
+            const data = await getAccountDataObj(acc, true);
+            acc.domain = GLADOS_DOMAIN;
+            if (data.transientFailure) transientFailures++;
+            applyAccountRuntimeState(acc, data, true);
+            resultRows.push(formatCheckinResultRow(acc, i + 1, pref, data));
+            await new Promise(function(resolve) { setTimeout(resolve, 600); });
+        }
+        await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
+
+        // Every account failed only because no upstream domain answered:
+        // nothing was decided, so hand the day back for the next tick
+        // instead of reporting all valid accounts as failed. Bounded to
+        // three attempts per day, then the failure is reported as before.
+        if (accounts.length > 0 && transientFailures === accounts.length && claim.attempts < 3) {
+            await releaseScheduledCheckin(claim, env);
+            return 'retry-later';
+        }
+
+        await finishScheduledCheckin(claim, env);
+        // The check-in is done and recorded; a Telegram delivery hiccup
+        // must not fail the whole tick or lose the day.
+        try {
+            await tgSendResultList(userId, formatCheckinSummary(resultRows), resultRows, env);
+        } catch (e) {
+            console.log('Scheduled check-in notification failed:', String(e && e.message || e));
+        }
+        return 'done';
+    } catch (e) {
+        // A crashed attempt releases its claim so a later tick the same day
+        // can still complete the check-in.
+        await releaseScheduledCheckin(claim, env);
+        throw e;
     }
-    await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
-    await tgSendResultList(userId, formatCheckinSummary(resultRows), resultRows, env);
 }
 
 // ================= 数据解析与提取引擎 =================
@@ -894,27 +1025,53 @@ async function getAccountDataObj(acc, doCheckin = false) {
     let data = {
         statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙",
         pointsStr: "0", pointChange: "-", pointBalance: "0", timeLeft: "0", planStr: "未知",
-        cookieValid: null, checkinState: "failed"
+        cookieValid: null, checkinState: "failed", transientFailure: false, checkinUa: null
     };
 
     try {
-        // GLaDOS 域名互通：每个接口均从可用域名回退，避免已统一的旧 Cookie 因单个域名故障失效。
+        // 1) Check in first and classify it on its own response. The outcome
+        // used to be decided only inside the status-success branch below, so
+        // a status timeout silently rewrote an already-successful check-in
+        // as "failed" and poisoned the account's health flag for the day.
         let checkinRes = null;
+        let checkinDomain = null;
         if (doCheckin) {
-            checkinRes = (await gladosFetchJson(acc, '/api/user/checkin', {
-                method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN })
-            })).data;
+            const attempt = function(ua) {
+                return gladosFetchJson(acc, '/api/user/checkin', {
+                    method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }),
+                    ...(ua ? { headers: { 'User-Agent': ua } } : {})
+                });
+            };
+            const first = await attempt(acc.checkinUa || null);
+            checkinRes = first.data;
+            checkinDomain = first.domain;
+            // Device mismatch: retry once with the UA of the platform the
+            // server says the cookie was created on, and remember that UA
+            // on the account so later check-ins use it from the start.
+            if (checkinRes && checkinRes.code === 4 && checkinRes.reason === 'device-mismatch') {
+                const ua = platformUserAgent(checkinRes.loginDevice);
+                if (ua && ua !== (acc.checkinUa || HEADERS['User-Agent'])) {
+                    const retry = await attempt(ua);
+                    if (retry.data) {
+                        checkinRes = retry.data;
+                        checkinDomain = retry.domain;
+                        data.checkinUa = ua;
+                    }
+                }
+            }
         }
 
-        const statusLookup = await gladosFetchJson(acc, '/api/user/status');
+        // 2) Status/traffic/points only enrich the result; they never decide
+        // whether the check-in itself succeeded.
+        const statusLookup = await gladosFetchJson(acc, '/api/user/status', checkinDomain ? { preferredDomain: checkinDomain } : undefined);
         const activeAcc = { ...acc, domain: statusLookup.domain };
         const statusRes = statusLookup.data;
-        // Do not spend two more full domain-fallback chains when status already failed.
-        const statusValid = statusRes && statusRes.code === 0 && statusRes.data;
+        const statusValid = Boolean(statusRes && statusRes.code === 0 && statusRes.data);
         const trafficRes = statusValid ? (await gladosFetchJson(activeAcc, '/api/user/traffic')).data : null;
         const pointsRes = statusValid ? (await gladosFetchJson(activeAcc, '/api/user/points')).data : null;
 
-        if (statusRes && statusRes.code === 0 && statusRes.data) {
+        let checkedInToday = false;
+        if (statusValid) {
             data.cookieValid = true;
             data.timeLeft = parseInt(statusRes.data.leftDays || 0).toString();
             data.planStr = VIP_MAP[statusRes.data.vip] || `VIP${statusRes.data.vip}`;
@@ -927,8 +1084,7 @@ async function getAccountDataObj(acc, doCheckin = false) {
 
             let balanceNum = 0;
             let changeStr = "0";
-            let checkedInToday = false;
-            
+
             // 【核心修复】强制使用系统时间+8小时算出准确的北京日期进行对比
             let serverTime = statusRes.data.system_time || Date.now();
             let bjDate = new Date(serverTime + 8 * 3600 * 1000);
@@ -957,40 +1113,51 @@ async function getAccountDataObj(acc, doCheckin = false) {
             else data.pointsStr = `${balanceNum}`;
             data.pointChange = checkedInToday && changeStr !== '0' ? changeStr : '-';
             data.pointBalance = String(balanceNum);
+        } else if (statusRes && gladosBusinessAuthFailure(statusRes)) {
+            data.cookieValid = false;
+        }
 
-            if (doCheckin) {
-                if (checkinRes) {
-                    const rawMess = String(checkinRes.message || checkinRes.msg || "");
-                    if (!gladosBusinessAuthFailure(checkinRes) && (checkinRes.code === 1 || /tomorrow|already|已签到/i.test(rawMess))) {
-                        data.statusMsg = "🔁 已签到";
-                        data.checkinState = "already";
-                    } else if (gladosCheckinSucceeded(checkinRes)) {
-                        data.statusMsg = "✅ 签到成功";
-                        data.checkinState = "success";
-                    } else {
-                        data.statusMsg = checkinRes.code === 4 && checkinRes.reason === 'device-mismatch'
-                            ? '❌ 登录设备不匹配，请用登录时的设备重新获取 Cookie（设备：' + String(checkinRes.loginDevice || '未知') + '）'
-                            : /automated check.?in detected/i.test(rawMess)
-                            ? '❌ GLaDOS 拒绝自动签到，请在官网重新登录并更新 Cookie'
-                            : `❌ ${rawMess || '签到失败'}`;
-                        data.checkinState = "failed";
-                    }
+        // 3) Classification. An explicit auth failure from status proves the
+        // cookie is dead; anything else is judged by the check-in response
+        // alone, never by whether the enrichment queries happened to work.
+        if (doCheckin) {
+            if (data.cookieValid === false) {
+                data.statusMsg = '❌ Cookie 失效，请重新登录并更新完整 Cookie';
+                data.checkinState = "failed";
+            } else if (checkinRes) {
+                const rawMess = String(checkinRes.message || checkinRes.msg || "");
+                if (!gladosBusinessAuthFailure(checkinRes) && (checkinRes.code === 1 || /tomorrow|already|已签到/i.test(rawMess))) {
+                    data.statusMsg = "🔁 已签到";
+                    data.checkinState = "already";
+                } else if (gladosCheckinSucceeded(checkinRes)) {
+                    data.statusMsg = "✅ 签到成功";
+                    data.checkinState = "success";
                 } else {
-                    data.statusMsg = "❌ 签到请求超时";
+                    data.statusMsg = checkinRes.code === 4 && checkinRes.reason === 'device-mismatch'
+                        ? '❌ 登录设备不匹配，且按登录设备重试仍失败，请用登录时的设备重新获取 Cookie（设备：' + String(checkinRes.loginDevice || '未知') + '）'
+                        : /automated check.?in detected/i.test(rawMess)
+                        ? '❌ GLaDOS 拒绝自动签到，请在官网重新登录并更新 Cookie'
+                        : `❌ ${rawMess || '签到失败'}`;
                     data.checkinState = "failed";
                 }
             } else {
-                data.statusMsg = checkedInToday ? "🔁 今日已签到" : "⚠️ 今日未签到";
-                data.checkinState = checkedInToday ? "already" : "pending";
+                data.statusMsg = "❌ 签到请求超时";
+                data.checkinState = "failed";
+                // No domain produced any business response: this is an
+                // upstream/network condition, not an account verdict.
+                data.transientFailure = true;
             }
         } else {
-            if (statusRes && gladosBusinessAuthFailure(statusRes)) {
-                data.cookieValid = false;
+            if (data.cookieValid === false) {
                 data.statusMsg = '❌ Cookie 失效，请重新登录并更新完整 Cookie';
+            } else if (statusValid) {
+                data.statusMsg = checkedInToday ? "🔁 今日已签到" : "⚠️ 今日未签到";
+                data.checkinState = checkedInToday ? "already" : "pending";
             }
         }
     } catch (e) {
         data.statusMsg = "❌ 运行异常";
+        data.transientFailure = Boolean(doCheckin);
     }
     return data;
 }

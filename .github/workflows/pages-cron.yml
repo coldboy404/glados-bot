@@ -1,8 +1,14 @@
 name: Pages scheduled tasks
 on:
   schedule:
-    # Offset from minute zero; GitHub scheduling is best-effort.
+    # GitHub scheduling is best-effort and heavily throttled at */5: in this
+    # repository the */5 line alone actually fired only about five times a
+    # day, with 3-7 hour gaps, so a tick often never landed in the check-in
+    # hour at all. Two independent schedules raise the chance that at least
+    # one tick lands after the configured hour; the Pages endpoint is
+    # idempotent (daily claim in KV), so extra ticks are harmless.
     - cron: '2-57/5 * * * *'
+    - cron: '17,47 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,7 +19,7 @@ jobs:
   tick:
     if: ${{ vars.PAGES_URL != '' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - name: Trigger authenticated Pages timer
         env:
@@ -30,14 +36,29 @@ jobs:
             printf '%s\n' 'Pages 尚未运行机器人：构建命令 npm run build:pages，输出目录 pages/dist，重新部署最新提交。'
             exit 1
           fi
-          code=$(curl --silent --show-error --connect-timeout 15 --max-time 780 \
-            --output response.json --write-out '%{http_code}' \
-            --request POST --header "Authorization: Bearer $BOT_TOKEN" \
-            "${PAGES_URL%/}/internal/cron")
-          case "$code" in
-            200) python3 -c 'import json; assert json.load(open("response.json")).get("ok") is True';;
-            403) printf '%s\n' 'BOT_TOKEN 不一致，请检查 Pages 和 Actions Secret。'; exit 1;;
-            404|405) printf '%s\n' 'Pages 未部署最新机器人代码，请检查构建命令和输出目录。'; exit 1;;
-            503) printf '%s\n' 'Pages 缺少 GLADOS_DB 绑定或有效 ADMIN_ID。'; exit 1;;
-            *) printf '定时任务失败，HTTP %s，请检查 Pages 日志。\n' "$code"; exit 1;;
-          esac
+          # Retry transient failures inside the same run. A single 500 or a
+          # dropped connection used to end the attempt for the whole day;
+          # the Pages handler now releases its daily claim on failure, so
+          # retrying here is safe and cannot double check in.
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            code=$(curl --silent --show-error --connect-timeout 15 --max-time 780 \
+              --output response.json --write-out '%{http_code}' \
+              --request POST --header "Authorization: Bearer $BOT_TOKEN" \
+              "${PAGES_URL%/}/internal/cron") || code=000
+            case "$code" in
+              200)
+                python3 -c 'import json; assert json.load(open("response.json")).get("ok") is True'
+                cat response.json
+                exit 0
+                ;;
+              403) printf '%s\n' 'BOT_TOKEN 不一致，请检查 Pages 和 Actions Secret。'; exit 1;;
+              404|405) printf '%s\n' 'Pages 未部署最新机器人代码，请检查构建命令和输出目录。'; exit 1;;
+              503) printf '%s\n' 'Pages 缺少 GLADOS_DB 绑定或有效 ADMIN_ID。'; exit 1;;
+              *) printf '第 %s 次定时任务失败，HTTP %s，稍后重试。\n' "$attempt" "$code";;
+            esac
+            attempt=$((attempt + 1))
+            if [ "$attempt" -le 3 ]; then sleep 60; fi
+          done
+          printf '%s\n' '定时任务重试 3 次仍失败，请检查 Pages 日志。'
+          exit 1
