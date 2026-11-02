@@ -55,12 +55,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Bot still points to Pages; temporarily isolate this not-yet-live Worker.
+          # Temporarily isolate this Worker with a minimal source.
           printf '%s\n' 'export default { fetch() { return new Response("runtime-probe-ok"); } };' > runtime-probe.js
           printf '%s\n' 'name = "glados-bot"' 'main = "runtime-probe.js"' 'compatibility_date = "2026-04-30"' 'workers_dev = true' 'keep_vars = true' > runtime-probe.toml
           # Remove inherited bindings/triggers from the probe; always restore root config afterwards.
           npx --yes wrangler@4.153.0 deploy --config runtime-probe.toml --keep-vars
-          code=$(curl --silent --show-error --max-time 20 --output probe.txt --write-out '%{http_code}' https://glados-bot.jwpgod.workers.dev/)
+          subdomain=$(curl --silent --show-error --fail \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["subdomain"])')
+          code=$(curl --silent --show-error --max-time 20 --output probe.txt --write-out '%{http_code}' "https://glados-bot.$subdomain.workers.dev/")
           echo "Minimal runtime probe HTTP: $code"
           if [ "$code" = '200' ] && [ "$(cat probe.txt)" = 'runtime-probe-ok' ]; then
             echo 'Minimal source works: investigate application initialization next.'

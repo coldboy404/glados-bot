@@ -202,7 +202,7 @@ async function reconcileTelegramWebhook(env) {
         console.log('Webhook 自动恢复跳过：WEBHOOK_URL 未配置或格式无效');
         throw new Error('WEBHOOK_URL 未配置或格式无效');
     }
-    // Same token may migrate from Workers to Pages, or another deployment may reclaim it.
+    // Same token may be reclaimed by another deployment.
     if (savedFingerprint === fingerprint) {
         const info = await telegramApi(env, 'getWebhookInfo');
         if (info.ok && info.result && info.result.url === webhookUrl && !info.result.last_error_message) return;
@@ -706,20 +706,6 @@ async function processCronTime(chatId, userId, text, env) {
 
 // ================= 核心：链式引擎驱动 =================
 async function executeTask(task, env, origin) {
-    // Pages webhook background work expires shortly after the HTTP response.
-    // Persist read/check-in batches for the authenticated timer's active request.
-    if (env.CF_PAGES && !env.PAGES_TASK_RUNNER && ['checkin', 'view_all', 'sub_all'].includes(task.type)) {
-        const userId = getAdminUserId(env);
-        if (String(task.userId) !== userId) return;
-        const key = 'PAGES_MANUAL_TASK_' + userId;
-        if (await env.GLADOS_DB.get(key)) {
-            await tgSend(task.chatId, '⏳ 已有批量任务等待处理，请勿重复点击。定时器通常在几分钟内开始执行。', env);
-            return;
-        }
-        await env.GLADOS_DB.put(key, JSON.stringify(task), { expirationTtl: 3600 });
-        await tgSend(task.chatId, '⏳ 批量任务已保存，将由定时器处理（通常几分钟，GitHub 调度可能延迟），完成后发送结果。', env);
-        return;
-    }
     const { type, chatId, userId, startIndex, plan, successList = [], resultList = [] } = task;
     const accounts = await getAccounts(userId, env);
     const pref = await getPref(userId, env);
@@ -885,7 +871,7 @@ async function handleScheduled(env) {
 
     const now = getBeijingDateParts();
     const pref = await getPref(userId, env);
-    // GitHub schedules can be delayed: catch up later the same day, once only.
+    // Cron can be delayed: catch up later the same day, once only.
     if (now.hour < pref.checkinHour) return 'not-due';
     const claim = await claimScheduledCheckin(userId, now.date, env);
     if (!claim) return 'already-handled';

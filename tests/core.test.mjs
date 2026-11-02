@@ -134,3 +134,31 @@ test('single exchange rejects missing accounts and reports business failure',asy
  f.c.safeFetchJson=async()=>({code:-1,message:'<denied>'});f.c.getAccountDataObj=async()=>({});
  await f.c.handleCallback(cb,f.env,'https://example.com');assert.match(f.sent.at(-1),/❌ 兑换失败/);assert.ok(!f.sent.at(-1).includes('✅ 兑换'));
 });
+function schedFixture(){
+ const store=new Map(),c=vm.createContext({Request,Response,URL,TextEncoder,crypto,console,Date,Intl,AbortSignal,
+ setTimeout:(fn)=>{fn();return 0;},clearTimeout(){},fetch:async()=>Response.json({ok:true})});
+ vm.runInContext(readFileSync('worker.js','utf8').replace('export default {','globalThis.worker = {'),c);
+ const env={BOT_TOKEN:'dummy',ADMIN_ID:'200',GLADOS_DB:{get:async k=>store.get(k)??null,put:async(k,v)=>store.set(k,v),delete:async k=>store.delete(k)}};
+ store.set('USER_200',JSON.stringify([{domain:'glados.network',cookie:'secret',email:'test@example.com'}]));
+ vm.runInContext(`getBeijingDateParts=()=>({date:'2026-10-27',hour:12});`,c);
+ c.formatCheckinResultRow=()=>'row'; c.tgSendResultList=async()=>{};
+ return {c,store,env,claimKey:'SCHEDULED_CHECKIN_200_2026-10-27'};
+}
+test('scheduled check-in releases its claim after transient failure and retries the same day',async()=>{
+ const f=schedFixture(); let calls=0;
+ f.c.getAccountDataObj=async()=>{calls++; return calls===1?{checkinState:'failed',transientFailure:true}:{checkinState:'success',statusMsg:'ok',cookieValid:true};};
+ assert.equal(await f.c.handleScheduled(f.env),'retry-later');
+ assert.equal(f.store.has(f.claimKey),false);
+ assert.equal(await f.c.handleScheduled(f.env),'done');
+ assert.equal(JSON.parse(f.store.get(f.claimKey)).state,'done');
+ assert.equal(await f.c.handleScheduled(f.env),'already-handled');
+ assert.equal(calls,2);
+});
+test('scheduled check-in crash releases the claim so a later tick can finish',async()=>{
+ const f=schedFixture();
+ f.c.getAccountDataObj=async()=>{throw new Error('boom');};
+ await assert.rejects(f.c.handleScheduled(f.env));
+ assert.equal(f.store.has(f.claimKey),false);
+ f.c.getAccountDataObj=async()=>({checkinState:'success',statusMsg:'ok',cookieValid:true});
+ assert.equal(await f.c.handleScheduled(f.env),'done');
+});

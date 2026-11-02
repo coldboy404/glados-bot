@@ -15,5 +15,4 @@ jobs:
         with:
           node-version: '22'
       - run: npm test
-      - run: npm run build:pages
-      - run: node --check pages/dist/_worker.js
+      - run: node --check worker.js

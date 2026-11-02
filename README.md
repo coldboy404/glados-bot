@@ -17,56 +17,11 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 
 推送 `main` 会运行 **Deploy Worker**：先测试，再部署 `wrangler.toml` 中的 `glados-bot`，保留 Dashboard 变量。GitHub Actions Secrets 需要 `CLOUDFLARE_API_TOKEN`（仅目标账户的 Workers Scripts 编辑、Workers KV 读取、账户设置读取权限）和 `CLOUDFLARE_ACCOUNT_ID`。不要将临时 OAuth 登录凭据作为长期 CI Token。缺少凭据时部署 job 会跳过并在 Summary 明示，不代表已经发布。
 
-运行时在 Worker 配置 `BOT_TOKEN`、`ADMIN_ID`、`WEBHOOK_URL`，KV `GLADOS_DB` 保留现有命名空间。原生 Cron 负责定时执行；Workers 不使用 Pages 手动任务等待逻辑。切换后停用 Pages scheduled tasks 和 Pages Git 自动部署，保留旧项目与 KV 以便回滚。
+运行时在 Worker 配置 `BOT_TOKEN`、`ADMIN_ID`、`WEBHOOK_URL`，KV `GLADOS_DB` 保留现有命名空间。原生 Cron 负责定时执行：实际签到遵循 Telegram 菜单设置的北京时间小时，按当前管理员、每天去重；允许迟到补签（当天任意一次触发在设定小时之后都会执行）、失败自动释放当天执行权并在当天内重试（最多 3 次）、崩溃遗留的执行权 10 分钟后可被接管，不会再因为一次失败丢掉一整天。
 
-## Cloudflare Pages 版（可选）
+签到结果只由签到接口本身判定，状态查询超时不会再把已成功的签到改写为失败；上游整体无响应属于瞬时故障，不会把账号标记为失败。菜单的健康行按 Cookie 有效性统计，定时签到未成功只单独提示，不再显示为账号失效。若 Cookie 是在手机或 Mac 上登录的，签到可能因设备不匹配（code 4）被拒，Bot 会按服务端返回的登录设备平台自动切换 UA 重试一次，并记住该账号可用的 UA。
 
-原 Workers 版保持不变；Pages 版复用同一份业务代码，支持原有 Telegram 菜单、多账号、域名回退和签到结果通知。
-
-### 1. 创建 Pages 项目
-
-在 Cloudflare → Workers & Pages → 创建 → **Pages** → 连接此 GitHub 仓库：
-
-- 生产分支：`main`
-- 框架预设：None
-- 构建命令：`npm run build:pages`
-- 构建输出目录：`pages/dist`
-- 根目录：仓库根目录，留空即可
-
-这是 Pages Git 集成，不是 Workers Builds；不要使用 `npx wrangler deploy`。构建脚本从 `worker.js` 生成 advanced-mode `_worker.js`，无需手动复制代码，也不需要安装依赖。根目录的 `wrangler.toml` 仍只服务原 Workers 版，没有 `pages_build_output_dir`，不作为 Pages 配置；Pages 绑定和变量在 Dashboard 设置。
-
-### 2. 设置生产环境绑定和变量
-
-Pages 项目 → Settings → Bindings，添加 KV 绑定 **`GLADOS_DB`**，选择已有命名空间可保留原账号和偏好。Settings → Variables and Secrets 配置：
-
-| 名称 | 类型 | 值 |
-|---|---|---|
-| `BOT_TOKEN` | Secret | BotFather Token |
-| `ADMIN_ID` | Secret 或 Text | 管理员 Telegram 数字 ID |
-| `WEBHOOK_URL` | Text | `https://你的Pages域名/webhook`，也支持自定义域名 |
-
-修改绑定或变量后重新部署生产环境。不要在预览环境配置同一个生产 Bot Token，以免预览部署抢占 webhook。
-
-### 3. 启用自动签到和 Token 自动恢复
-
-**Pages 不支持 Cron Triggers**。仓库提供外部 GitHub Actions 定时器，通过受密钥保护的 `POST /internal/cron` 驱动 Pages；实际签到仍遵循 Telegram 菜单设置的北京时间小时，按当前管理员、每天去重。请求会等待本轮任务结束，不依赖 Pages 的短生命周期后台任务。`/internal/cron` 内部三段相互隔离：webhook 自动恢复失败、排队的手动任务失败都不会再跳过当天的定时签到；失败的手动任务只消费一次，不会反复阻塞后续 tick。
-
-GitHub 仓库 → Settings → Secrets and variables → Actions：
-
-- Variables：`PAGES_URL` = `https://你的Pages域名`（仅 origin，不加路径）
-- Secrets：`BOT_TOKEN` = 与 Pages 相同的机器人 Token（复用，不需要额外密钥）
-
-部署完成后进入 Actions → **Pages scheduled tasks** → Run workflow，首次运行会注册 Telegram webhook 和命令。以后更换 `BOT_TOKEN`，重新部署后由定时器自动恢复。未设置 `PAGES_URL` 时，此工作流会跳过，不影响原 Workers 用户。
-
-Pages 的「批量签到 / 查看全部账户 / 提取全部订阅」会先存入 KV，再由同一个 Actions 定时器执行，避免 Telegram webhook 返回后的后台任务寿命限制。点击后通常等待几分钟；可手动运行 **Pages scheduled tasks** 提前触发。任务完成前不要重复点击。大量账号仍可能受 HTTP 超时和 Cloudflare 子请求配额限制；这不是无限时任务队列，中断后重试可能重复查询或签到。
-
-GitHub 定时任务是尽力而为且会被大幅限流：本仓库实测 `*/5` 调度实际只触发约每天 5 次、间隔 3–7 小时，不保证整点或五分钟 SLA。因此工作流内置两条独立调度，并在同一次运行内对瞬时失败重试 3 次；服务端则允许迟到补签（当天任意 tick 在设定小时之后都会执行）、失败自动释放当天执行权、崩溃遗留的执行权 10 分钟后可被接管，不会再因为一次失败丢掉一整天。需要更准时的调度时，可改用自己的定时器每五分钟向同一路径 POST，并发送 `Authorization: Bearer <BOT_TOKEN>`，不要同时开启多个定时器。KV 的去重不是原子锁，仓库工作流通过 concurrency 串行执行。超大账号批次仍受 Cloudflare 请求/子请求配额和 HTTP 超时约束，超时不等于后台一定完成，应检查 Telegram 实际结果。
-
-签到结果只由签到接口本身判定，状态查询超时不会再把已成功的签到改写为失败；上游整体无响应属于瞬时故障，不会把账号标记为失败、当天还会自动重试（最多 3 次）。菜单的健康行按 Cookie 有效性统计，定时签到未成功只单独提示，不再显示为账号失效。若 Cookie 是在手机或 Mac 上登录的，签到可能因设备不匹配（code 4）被拒，Bot 会按服务端返回的登录设备平台自动切换 UA 重试一次，并记住该账号可用的 UA。
-
-**从 Workers 迁移：**在停用旧 Worker 的业务 Cron 后再开启 Pages 定时器，避免重复执行；同一个 Bot 只能有一个 webhook，注册 Pages 地址会将 Telegram 消息切换到 Pages。不要直接删除旧 KV。原 Worker 的 Token 自动恢复 Cron 也应关闭，避免把 webhook 改回旧地址。
-
-本地验证：`npm test && npm run build:pages && node --check pages/dist/_worker.js`。本仓库仅构建 Pages 产物，不会自动创建或部署新的 Cloudflare 项目。
+本地验证：`npm test && node --check worker.js`。
 
 ## Workers 版部署
 
@@ -103,7 +58,7 @@ GitHub 定时任务是尽力而为且会被大幅限流：本仓库实测 `*/5` 
 
 在 Telegram 里跟 bot 聊。手动批量签到和每天定时签到都会逐个显示 GLaDOS 账号结果；账号较多时会自动拆分成多条消息，避免 Telegram 长度限制。
 
-- **GLaDOS**：点「添加账号」→ 选择唯一的 GLaDOS 入口 → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。Workers 和 Pages 使用同一份站点列表与业务逻辑；界面统一显示 GLaDOS，内部优先 `glados-facility.com`，再依次回退其他已支持域名。
+- **GLaDOS**：点「添加账号」→ 选择唯一的 GLaDOS 入口 → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户；界面统一显示 GLaDOS，内部优先 `glados-facility.com`，再依次回退其他已支持域名。
 Cookie 不要删减。手动指定邮箱可用 `邮箱|Cookie`，例如 `user@example.com|clk:xxxx=示例值; clk:xxxx.sig=示例签名`，每行一个账号；只按第一个 `|` 分隔，Cookie 中的冒号不参与解析。手动导入不限制 Cookie 名称，只检查邮箱及键值格式，不代表登录有效；有效性以实际账户查询为准。旧的 `邮箱:Cookie` 格式不再支持。
 
 ## 抓 Cookie（Surge / Loon / QX / Egern）
