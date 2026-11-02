@@ -1,0 +1,81 @@
+name: Diagnose Worker settings
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Compare glados-bot service settings with healthy workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          acct = os.environ['CLOUDFLARE_ACCOUNT_ID']
+          token = os.environ['CLOUDFLARE_API_TOKEN']
+          base = f'https://api.cloudflare.com/client/v4/accounts/{acct}'
+          def get(path):
+              req = urllib.request.Request(base + path, headers={'Authorization': f'Bearer {token}'})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      return resp.status, json.loads(resp.read().decode())
+              except urllib.error.HTTPError as e:
+                  try: return e.code, json.loads(e.read().decode())
+                  except Exception: return e.code, {}
+          def redact(obj):
+              if isinstance(obj, dict):
+                  out = {}
+                  for k, v in obj.items():
+                      if any(s in k.upper() for s in ('TOKEN', 'SECRET', 'KEY', 'PASSWORD')) and isinstance(v, str):
+                          out[k] = '<redacted>'
+                      elif k in ('text', 'value') and isinstance(v, str) and len(v) > 12:
+                          out[k] = v[:4] + '...<redacted>'
+                      else:
+                          out[k] = redact(v)
+                  return out
+              if isinstance(obj, list):
+                  return [redact(x) for x in obj]
+              return obj
+          status, scripts = get('/workers/scripts')
+          names = [s.get('id') for s in scripts.get('result', [])]
+          print('ALL SCRIPTS:', names)
+          targets = ['glados-bot'] + [n for n in names if n != 'glados-bot'][:4]
+          consumer_services = []
+          for name in targets:
+              s2, res = get(f'/workers/scripts/{name}/settings')
+              result = res.get('result') or {}
+              print(f'--- SETTINGS {name} HTTP {s2} ---')
+              print(json.dumps(redact(result), ensure_ascii=False)[:4000])
+              for tc in (result.get('tail_consumers') or []):
+                  if tc.get('service'): consumer_services.append(tc['service'])
+              s3, sub = get(f'/workers/scripts/{name}/subdomain')
+              print(f'--- SUBDOMAIN {name} HTTP {s3} ---')
+              print(json.dumps(sub.get('result'), ensure_ascii=False)[:500])
+          for svc in sorted(set(consumer_services)):
+              s4, res = get(f'/workers/services/{svc}')
+              print(f'--- TAIL CONSUMER SERVICE {svc} HTTP {s4} exists={s4 == 200} ---')
+          PY
+      - name: Fresh-name probe with propagation wait
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          printf '%s\n' 'export default { fetch() { return new Response("runtime-probe-ok"); } };' > probe.js
+          printf '%s\n' 'name = "glados-probe-1101"' 'main = "probe.js"' 'compatibility_date = "2026-04-30"' 'workers_dev = true' > probe.toml
+          npx --yes wrangler@4.153.0 deploy --config probe.toml
+          subdomain=$(curl --silent --show-error --fail \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["subdomain"])')
+          sleep 45
+          code=$(curl --silent --show-error --max-time 20 --output probe-c.txt --write-out '%{http_code}' "https://glados-probe-1101.$subdomain.workers.dev/")
+          echo "PROBE fresh-name after 45s HTTP: $code"
+          head -c 300 probe-c.txt; echo
+          npx --yes wrangler@4.153.0 delete --name glados-probe-1101 || true
