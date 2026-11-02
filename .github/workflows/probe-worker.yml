@@ -1,0 +1,69 @@
+name: Probe Worker 1101
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deploy one-line probe under a throwaway name
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          printf '%s\n' 'export default { fetch() { return new Response("runtime-probe-ok"); } };' > probe.js
+          printf '%s\n' 'name = "glados-probe-1101"' 'main = "probe.js"' 'compatibility_date = "2026-04-30"' 'workers_dev = true' > probe.toml
+          npx --yes wrangler@4.153.0 deploy --config probe.toml
+          subdomain=$(curl --silent --show-error --fail \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["subdomain"])')
+          echo "subdomain=$subdomain" >> "$GITHUB_ENV"
+          code=$(curl --silent --show-error --max-time 20 --output probe-a.txt --write-out '%{http_code}' "https://glados-probe-1101.$subdomain.workers.dev/")
+          echo "PROBE throwaway-name HTTP: $code"
+          head -c 300 probe-a.txt; echo
+      - name: Deploy one-line probe as glados-bot without bindings or triggers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          printf '%s\n' 'name = "glados-bot"' 'main = "probe.js"' 'compatibility_date = "2026-04-30"' 'workers_dev = true' 'keep_vars = true' > probe-bot.toml
+          npx --yes wrangler@4.153.0 deploy --config probe-bot.toml --keep-vars
+          timeout 30s npx --yes wrangler@4.153.0 tail glados-bot --format json > tail.json 2>tail.err &
+          tail_pid=$!
+          trap 'kill "$tail_pid" 2>/dev/null || true' EXIT
+          sleep 8
+          code=$(curl --silent --show-error --max-time 20 --output probe-b.txt --write-out '%{http_code}' "https://glados-bot.$subdomain.workers.dev/")
+          sleep 5
+          echo "PROBE bot-name HTTP: $code"
+          head -c 300 probe-b.txt; echo
+          echo '--- tail outcome/exceptions ---'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for source in ('tail.json',):
+              raw = Path(source).read_text() if Path(source).exists() else ''
+              decoder = json.JSONDecoder()
+              while raw.strip():
+                  raw = raw.lstrip()
+                  try:
+                      event, end = decoder.raw_decode(raw)
+                  except ValueError:
+                      break
+                  print('outcome:', event.get('outcome'))
+                  for error in event.get('exceptions', []):
+                      print('exception:', error.get('name'), error.get('message'))
+                  raw = raw[end:]
+          PY
+      - name: Remove throwaway probe worker
+        if: always()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.153.0 delete --name glados-probe-1101 || true
