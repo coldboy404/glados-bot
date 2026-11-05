@@ -33,7 +33,7 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 | `ADMIN_ID` | Secret 或 Text | 管理员的纯数字 Telegram 用户 ID |
 | `WEBHOOK_URL` | Text | Worker 的固定完整 webhook 地址，例如 `https://你的域名/webhook` |
 
-在 Cloudflare 修改 `BOT_TOKEN` 后无需再访问 `/setup`：部署生效后最多五分钟，Bot 会用 `WEBHOOK_URL` 自动重新注册 webhook，并同步只保留 `/start` 命令。`ADMIN_ID` 修改随部署即时生效。根路径只返回运行状态，不会调用 Telegram API。
+在 Cloudflare 修改 `BOT_TOKEN` 后无需再访问 `/setup`：部署生效后最多一小时（下一次整点 Cron 触发时），Bot 会用 `WEBHOOK_URL` 自动重新注册 webhook，并同步只保留 `/start` 命令。`ADMIN_ID` 修改随部署即时生效。根路径只返回运行状态，不会调用 Telegram API。
 
 > ⚠️  按钮需要 `wrangler.toml` 的 `kv_namespaces` 里**不要写** `id` 字段（包括 `id = ""`），否则按钮页面报"无法获取存储库内容"。
 
