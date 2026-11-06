@@ -5,9 +5,10 @@ workers_dev = true
 # Cloudflare GitHub 自动部署时保留 Dashboard 中已配置的 BOT_TOKEN / ADMIN_ID 等变量
 keep_vars = true
 
+# 不写 id：部署时由 Wrangler 在目标账号自动创建并绑定 KV 命名空间，
+# 任何账号 fork 本仓库连接 Cloudflare 即可直接部署，无需改配置。
 [[kv_namespaces]]
 binding = "GLADOS_DB"
-id = "8a5fde06dbda493eb066564e254b47db"
 
 [triggers]
 # 每小时执行签到；BOT_TOKEN 变化时也在每小时触发时自动重设 webhook。

@@ -17,7 +17,7 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 
 推送 `main` 会运行 **Deploy Worker**：先测试，再部署 `wrangler.toml` 中的 `glados-bot`，保留 Dashboard 变量。GitHub Actions Secrets 需要 `CLOUDFLARE_API_TOKEN`（仅目标账户的 Workers Scripts 编辑、Workers KV 读取、账户设置读取权限）和 `CLOUDFLARE_ACCOUNT_ID`。不要将临时 OAuth 登录凭据作为长期 CI Token。缺少凭据时部署 job 会跳过并在 Summary 明示，不代表已经发布。
 
-运行时在 Worker 配置 `BOT_TOKEN`、`ADMIN_ID`、`WEBHOOK_URL`，KV `GLADOS_DB` 保留现有命名空间。原生 Cron 负责定时执行：实际签到遵循 Telegram 菜单设置的北京时间小时，按当前管理员、每天去重；允许迟到补签（当天任意一次触发在设定小时之后都会执行）、失败自动释放当天执行权并在当天内重试（最多 3 次）、崩溃遗留的执行权 10 分钟后可被接管，不会再因为一次失败丢掉一整天。
+运行时在 Worker 配置 `BOT_TOKEN`、`ADMIN_ID`、`WEBHOOK_URL`。KV `GLADOS_DB` 不写死命名空间 id：首次部署时由 Wrangler 在目标账号自动创建并绑定，fork 到任意账号连接 Cloudflare 即可直接部署，之后保持绑定。原生 Cron 负责定时执行：实际签到遵循 Telegram 菜单设置的北京时间小时，按当前管理员、每天去重；允许迟到补签（当天任意一次触发在设定小时之后都会执行）、失败自动释放当天执行权并在当天内重试（最多 3 次）、崩溃遗留的执行权 10 分钟后可被接管，不会再因为一次失败丢掉一整天。
 
 签到结果只由签到接口本身判定，状态查询超时不会再把已成功的签到改写为失败；上游整体无响应属于瞬时故障，不会把账号标记为失败。菜单的健康行按 Cookie 有效性统计，定时签到未成功只单独提示，不再显示为账号失效。若 Cookie 是在手机或 Mac 上登录的，签到可能因设备不匹配（code 4）被拒，Bot 会按服务端返回的登录设备平台自动切换 UA 重试一次，并记住该账号可用的 UA。
 
@@ -35,7 +35,7 @@ Telegram bot，自动签到 GLaDOS；支持多账号 Cookie 管理和健康监�
 
 在 Cloudflare 修改 `BOT_TOKEN` 后无需再访问 `/setup`：部署生效后最多一小时（下一次整点 Cron 触发时），Bot 会用 `WEBHOOK_URL` 自动重新注册 webhook，并同步只保留 `/start` 命令。`ADMIN_ID` 修改随部署即时生效。根路径只返回运行状态，不会调用 Telegram API。
 
-> ⚠️  按钮需要 `wrangler.toml` 的 `kv_namespaces` 里**不要写** `id` 字段（包括 `id = ""`），否则按钮页面报"无法获取存储库内容"。
+> ⚠️  `wrangler.toml` 的 `kv_namespaces` 里**不要写** `id` 字段：写了会绑死某个账号的命名空间，其他账号部署直接报 10041；不写则部署时自动创建并绑定。如需复用某个已有命名空间，再把它的 `id` 填回。
 
 ### Cloudflare GitHub 自动部署
 
