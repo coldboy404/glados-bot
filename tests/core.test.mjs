@@ -178,3 +178,13 @@ test('webhook reconciliation failure never blocks the scheduled check-in',async(
  await pending;
  assert.equal(checked,1);
 });
+test('setup accepts the token via query param for browser access and rejects wrong tokens',async()=>{
+ const f=fixture();
+ const ok=await f.c.worker.fetch(new Request('https://bot.example.com/setup?token=dummy'),f.env,{waitUntil(){}});
+ assert.equal(ok.status,200);
+ assert.equal((await ok.json()).webhook,true);
+ const bad=await f.c.worker.fetch(new Request('https://bot.example.com/setup?token=wrong'),f.env,{waitUntil(){}});
+ assert.equal(bad.status,403);
+ const header=await f.c.worker.fetch(new Request('https://bot.example.com/setup',{headers:{'X-Bot-Token':'dummy'}}),f.env,{waitUntil(){}});
+ assert.equal(header.status,200);
+});

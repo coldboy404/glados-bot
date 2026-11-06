@@ -249,7 +249,10 @@ export default {
         }
         
         if (url.pathname === '/setup' || url.pathname === '/debug') {
-            if (!env.BOT_TOKEN || request.headers.get('X-Bot-Token') !== env.BOT_TOKEN) {
+            // Header for scripts, ?token= for opening the link directly in a
+            // phone browser where no custom header can be set.
+            const providedToken = request.headers.get('X-Bot-Token') || url.searchParams.get('token');
+            if (!env.BOT_TOKEN || providedToken !== env.BOT_TOKEN) {
                 return new Response('Forbidden', { status: 403 });
             }
             if (url.pathname === '/setup') {
@@ -280,7 +283,7 @@ export default {
         return new Response(JSON.stringify({
             status: 'running',
             message: 'GLaDOS Bot 链式驱动引擎正常运行中。',
-            note: 'Webhook 由受保护的 /setup 路径配置；发送 /start 开始使用'
+            note: 'Webhook 由受保护的 /setup 路径配置（浏览器打开需带 ?token= 参数）；发送 /start 开始使用'
         }, null, 2), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
     },
 
