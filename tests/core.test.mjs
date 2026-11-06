@@ -162,3 +162,19 @@ test('scheduled check-in crash releases the claim so a later tick can finish',as
  f.c.getAccountDataObj=async()=>({checkinState:'success',statusMsg:'ok',cookieValid:true});
  assert.equal(await f.c.handleScheduled(f.env),'done');
 });
+test('scheduled tick runs webhook reconciliation and the check-in on the hourly cron',async()=>{
+ const f=fixture(); let reconciled=0,checked=0;
+ f.c.reconcileTelegramWebhook=async()=>{reconciled++;};
+ f.c.handleScheduled=async()=>{checked++; return 'done';};
+ let pending; f.c.worker.scheduled({cron:'0 * * * *'},f.env,{waitUntil:p=>{pending=p;}});
+ await pending;
+ assert.equal(reconciled,1); assert.equal(checked,1);
+});
+test('webhook reconciliation failure never blocks the scheduled check-in',async()=>{
+ const f=fixture(); let checked=0;
+ f.c.reconcileTelegramWebhook=async()=>{throw new Error('WEBHOOK_URL invalid');};
+ f.c.handleScheduled=async()=>{checked++; return 'done';};
+ let pending; f.c.worker.scheduled({cron:'0 * * * *'},f.env,{waitUntil:p=>{pending=p;}});
+ await pending;
+ assert.equal(checked,1);
+});

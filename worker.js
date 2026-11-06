@@ -285,11 +285,20 @@ export default {
     },
 
     async scheduled(event, env, ctx) {
-        if (event.cron === '0 * * * *') {
-            ctx.waitUntil(handleScheduled(env));
-        } else {
-            ctx.waitUntil(reconcileTelegramWebhook(env));
-        }
+        // Every tick does both jobs, isolated from each other: reconcile the
+        // Telegram webhook (this is the only automatic registration path —
+        // binding it to a specific cron pattern previously meant a
+        // deployment whose only trigger is the hourly one never registered
+        // its webhook at all), then run the scheduled check-in, which
+        // self-gates on the configured hour and the daily claim.
+        ctx.waitUntil((async () => {
+            try {
+                await reconcileTelegramWebhook(env);
+            } catch (e) {
+                console.log('Webhook reconciliation failed; continuing with scheduled work');
+            }
+            await handleScheduled(env);
+        })());
     }
 };
 
